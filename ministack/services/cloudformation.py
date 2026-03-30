@@ -51,6 +51,8 @@ def _p(params, key, default=""):
 
 def _resolve_stack_name(name_or_arn):
     """Resolve a stack name or ARN to the stack name key in _stacks."""
+    if not name_or_arn:
+        return name_or_arn or ""
     if name_or_arn in _stacks:
         return name_or_arn
     # Check if it's an ARN — format: arn:aws:cloudformation:region:account:stack/name/uuid
@@ -132,6 +134,34 @@ def _xml_extract(resp_body, tag):
 
 
 # ── Template Parsing ──────────────────────────────────────────
+
+
+async def _fetch_template_url(url):
+    """Fetch template body from S3 URL."""
+    # Support s3:// and https://s3... URLs
+    try:
+        if url.startswith("s3://"):
+            parts = url[5:].split("/", 1)
+            bucket, key = parts[0], parts[1] if len(parts) > 1 else ""
+        elif "s3" in url and ".amazonaws.com" in url:
+            # https://s3.amazonaws.com/bucket/key or https://bucket.s3.amazonaws.com/key
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            path = parsed.path.lstrip("/")
+            if parsed.hostname and parsed.hostname.endswith(".s3.amazonaws.com"):
+                bucket = parsed.hostname.split(".s3.amazonaws.com")[0]
+                key = path
+            else:
+                parts = path.split("/", 1)
+                bucket, key = parts[0], parts[1] if len(parts) > 1 else ""
+        else:
+            return ""
+        status, _, body = await s3.handle_request("GET", f"/{bucket}/{key}", {}, b"", {})
+        if status == 200:
+            return body.decode("utf-8") if isinstance(body, bytes) else body
+    except Exception:
+        pass
+    return ""
 
 
 def _parse_template(template_body):
@@ -354,7 +384,11 @@ def _scan_refs(value, known_resources):
             tmpl_str = sub_val[0] if isinstance(sub_val, list) else sub_val
             for m in re.finditer(r"\$\{([^}]+)\}", str(tmpl_str)):
                 var = m.group(1)
-                if var in known_resources:
+                # Support ${Resource.Attr} — extract resource name before the dot
+                base = var.split(".")[0]
+                if base in known_resources:
+                    refs.add(base)
+                elif var in known_resources:
                     refs.add(var)
         for v in value.values():
             refs |= _scan_refs(v, known_resources)
@@ -442,7 +476,7 @@ async def _create_s3_bucket_policy(logical_id, props, ctx):
     bucket = str(_resolve(props.get("Bucket", ""), ctx))
     policy_doc = _resolve(props.get("PolicyDocument", {}), ctx)
     policy_json = json.dumps(policy_doc).encode()
-    await s3.handle_request("PUT", f"/{bucket}?policy", {}, policy_json, {"policy": [""]})
+    await s3.handle_request("PUT", f"/{bucket}", {}, policy_json, {"policy": [""]})
     return {"physical_id": f"{bucket}-policy", "ref": f"{bucket}-policy", "attrs": {}}
 
 
@@ -497,6 +531,8 @@ async def _create_sqs_queue(logical_id, props, ctx):
 
     status, _, resp = await sqs.handle_request("POST", "/", {}, b"", qp)
     url = _xml_extract(resp, "QueueUrl")
+    if not url:
+        url = f"http://localhost:4566/000000000000/{queue_name}"
     arn = f"arn:aws:sqs:{ctx.get('region', REGION)}:{ctx.get('account_id', ACCOUNT_ID)}:{queue_name}"
     return {
         "physical_id": url,
@@ -1307,6 +1343,8 @@ async def _do_create_stack(stack_name, template, params, tags):
 
         # Rollback — delete created resources in reverse order
         await _rollback_resources(stack)
+        stack["StackStatus"] = "ROLLBACK_COMPLETE"
+        _add_event(stack, stack_name, "AWS::CloudFormation::Stack", "ROLLBACK_COMPLETE")
 
     return stack
 
@@ -1371,44 +1409,46 @@ async def _do_update_stack(stack_name, template, params):
     if not stack:
         raise ValueError(f"Stack {stack_name} does not exist")
 
-    old_status = stack["StackStatus"]
     stack["StackStatus"] = "UPDATE_IN_PROGRESS"
     _add_event(stack, stack_name, "AWS::CloudFormation::Stack", "UPDATE_IN_PROGRESS")
 
-    try:
-        # Delete old resources
-        await _rollback_resources(stack)
+    # Delete old resources
+    old_tags = stack.get("Tags", [])
+    old_stack_id = stack["StackId"]
+    await _rollback_resources(stack)
 
-        # Re-create with new template
-        old_tags = stack.get("Tags", [])
-        old_stack_id = stack["StackId"]
+    # Rebuild with new template
+    new_stack = await _do_create_stack(stack_name, template, params, old_tags)
+    new_stack["StackId"] = old_stack_id
 
-        # Rebuild
-        new_stack = await _do_create_stack(stack_name, template, params, old_tags)
-        new_stack["StackId"] = old_stack_id
-        if new_stack["StackStatus"] == "CREATE_COMPLETE":
-            new_stack["StackStatus"] = "UPDATE_COMPLETE"
-            _add_event(new_stack, stack_name, "AWS::CloudFormation::Stack", "UPDATE_COMPLETE")
+    if new_stack["StackStatus"] in ("CREATE_COMPLETE",):
+        new_stack["StackStatus"] = "UPDATE_COMPLETE"
+        _add_event(new_stack, stack_name, "AWS::CloudFormation::Stack", "UPDATE_COMPLETE")
         _stacks[stack_name] = new_stack
-    except Exception as e:
-        stack["StackStatus"] = "UPDATE_ROLLBACK_COMPLETE"
-        stack["StackStatusReason"] = str(e)
-        _add_event(stack, stack_name, "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_COMPLETE", str(e))
+    else:
+        # _do_create_stack failed (returns ROLLBACK_COMPLETE) — restore old stack
+        new_stack["StackStatus"] = "UPDATE_ROLLBACK_COMPLETE"
+        new_stack["StackStatusReason"] = new_stack.get("StackStatusReason", "Update failed")
+        _add_event(new_stack, stack_name, "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_COMPLETE")
+        _stacks[stack_name] = new_stack
 
 
 # ── API Actions ───────────────────────────────────────────────
 
 
 async def _act_create_stack(params):
-    stack_name = _resolve_stack_name(_p(params, "StackName"))
+    stack_name = _p(params, "StackName")  # Raw name for create, not ARN-resolved
     if not stack_name:
         return _error("ValidationError", "StackName is required")
     if stack_name in _stacks and _stacks[stack_name]["StackStatus"] != "DELETE_COMPLETE":
         return _error("AlreadyExistsException", f"Stack [{stack_name}] already exists")
 
     template_body = _p(params, "TemplateBody")
+    template_url = _p(params, "TemplateURL")
+    if not template_body and template_url:
+        template_body = await _fetch_template_url(template_url)
     if not template_body:
-        return _error("ValidationError", "TemplateBody is required")
+        return _error("ValidationError", "Either TemplateBody or TemplateURL is required")
 
     try:
         template = _parse_template(template_body)
@@ -1443,8 +1483,11 @@ async def _act_update_stack(params):
         return _error("ValidationError", f"Stack [{stack_name}] does not exist")
 
     template_body = _p(params, "TemplateBody")
+    template_url = _p(params, "TemplateURL")
+    if not template_body and template_url:
+        template_body = await _fetch_template_url(template_url)
     if not template_body:
-        return _error("ValidationError", "TemplateBody is required")
+        return _error("ValidationError", "Either TemplateBody or TemplateURL is required")
 
     try:
         template = _parse_template(template_body)
@@ -1495,10 +1538,12 @@ def _act_describe_stacks(params):
                 f"<Value>{_esc(t['Value'])}</Value>"
                 f"</member>"
             )
+        desc = s.get("Description", s.get("Template", {}).get("Description", ""))
         members_xml += (
             f"<member>"
             f"<StackName>{_esc(s['StackName'])}</StackName>"
             f"<StackId>{_esc(s['StackId'])}</StackId>"
+            f"<Description>{_esc(desc)}</Description>"
             f"<StackStatus>{_esc(s['StackStatus'])}</StackStatus>"
             f"<StackStatusReason>{_esc(s.get('StackStatusReason', ''))}</StackStatusReason>"
             f"<CreationTime>{_esc(s.get('CreationTime', ''))}</CreationTime>"

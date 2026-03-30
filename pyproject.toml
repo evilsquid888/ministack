@@ -30,6 +30,7 @@ dependencies = [
 full = [
     "duckdb>=0.10.0",
     "docker>=7.0.0",
+    "pyyaml>=6.0",
 ]
 dev = [
     "boto3>=1.34",
