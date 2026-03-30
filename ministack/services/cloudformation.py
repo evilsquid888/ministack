@@ -28,6 +28,7 @@ from ministack.core.responses import new_uuid
 from ministack.services import s3, sqs, sns, dynamodb, lambda_svc
 from ministack.services import ssm, eventbridge, cloudwatch_logs
 from ministack.services import secretsmanager, stepfunctions, ec2
+from ministack.services import apigateway_v1
 from ministack.services.iam_sts import handle_iam_request
 
 logger = logging.getLogger("cloudformation")
@@ -174,7 +175,7 @@ def _parse_template(template_body):
             loader = yaml.SafeLoader
             _cf_tags = {
                 '!Ref': lambda l, n: {"Ref": l.construct_scalar(n)},
-                '!Sub': lambda l, n: {"Fn::Sub": l.construct_scalar(n)},
+                '!Sub': lambda l, n: {"Fn::Sub": l.construct_sequence(n) if n.id == 'sequence' else l.construct_scalar(n)},
                 '!GetAtt': lambda l, n: {"Fn::GetAtt": l.construct_scalar(n).split(".")},
                 '!Join': lambda l, n: {"Fn::Join": l.construct_sequence(n)},
                 '!Select': lambda l, n: {"Fn::Select": l.construct_sequence(n)},
@@ -926,6 +927,29 @@ async def _create_ec2_security_group(logical_id, props, ctx):
     }
 
 
+async def _create_apigateway_restapi(logical_id, props, ctx):
+    """Create API Gateway REST API."""
+    resolved = {k: _resolve(v, ctx) for k, v in props.items()}
+    name = resolved.get("Name", f"{ctx.get('stack_name', '')}-{logical_id}")
+    data = {"name": name}
+    if "Description" in resolved:
+        data["description"] = resolved["Description"]
+    body = json.dumps(data).encode()
+    headers = {"content-type": "application/json"}
+    status, _, resp = await apigateway_v1.handle_request("POST", "/restapis", headers, body, {})
+    result = json.loads(resp) if resp else {}
+    api_id = result.get("id", str(uuid4())[:10])
+    root_resource_id = result.get("rootResourceId", "")
+    return {
+        "physical_id": api_id,
+        "ref": api_id,
+        "attrs": {
+            "RestApiId": api_id,
+            "RootResourceId": root_resource_id,
+        },
+    }
+
+
 # Register all resource creators
 _RESOURCE_CREATORS = {
     "AWS::S3::Bucket": _create_s3_bucket,
@@ -947,6 +971,7 @@ _RESOURCE_CREATORS = {
     "AWS::EC2::VPC": _create_ec2_vpc,
     "AWS::EC2::Subnet": _create_ec2_subnet,
     "AWS::EC2::SecurityGroup": _create_ec2_security_group,
+    "AWS::ApiGateway::RestApi": _create_apigateway_restapi,
 }
 
 
@@ -1151,6 +1176,13 @@ async def _delete_ec2_security_group(physical_id, resource_type, ctx):
         logger.warning("Failed to delete security group %s: %s", physical_id, e)
 
 
+async def _delete_apigateway_restapi(physical_id, resource_type, ctx):
+    try:
+        await apigateway_v1.handle_request("DELETE", f"/restapis/{physical_id}", {}, b"", {})
+    except Exception as e:
+        logger.warning("Failed to delete REST API %s: %s", physical_id, e)
+
+
 _RESOURCE_DELETERS = {
     "AWS::S3::Bucket": _delete_s3_bucket,
     "AWS::S3::BucketPolicy": _delete_s3_bucket_policy,
@@ -1171,6 +1203,7 @@ _RESOURCE_DELETERS = {
     "AWS::EC2::VPC": _delete_ec2_vpc,
     "AWS::EC2::Subnet": _delete_ec2_subnet,
     "AWS::EC2::SecurityGroup": _delete_ec2_security_group,
+    "AWS::ApiGateway::RestApi": _delete_apigateway_restapi,
 }
 
 
@@ -1232,6 +1265,35 @@ async def _do_create_stack(stack_name, template, params, tags):
             else:
                 raise ValueError(f"Missing required parameter: {pname}")
 
+        # 2b. Validate parameter constraints
+        for pname, pdef in template_params.items():
+            val = resolved_params.get(pname, "")
+            allowed = pdef.get("AllowedValues")
+            if allowed and val not in [str(v) for v in allowed]:
+                desc = pdef.get("ConstraintDescription", f"Value must be one of: {allowed}")
+                raise ValueError(f"Parameter '{pname}' value '{val}' is not an allowed value. {desc}")
+            pattern = pdef.get("AllowedPattern")
+            if pattern:
+                import re as _re
+                if not _re.fullmatch(pattern, str(val)):
+                    desc = pdef.get("ConstraintDescription", f"Value must match pattern: {pattern}")
+                    raise ValueError(f"Parameter '{pname}' value '{val}' does not match pattern. {desc}")
+            ptype = pdef.get("Type", "String")
+            if ptype == "Number":
+                try:
+                    num = float(val)
+                    if "MinValue" in pdef and num < float(pdef["MinValue"]):
+                        raise ValueError(f"Parameter '{pname}' value {val} is less than minimum {pdef['MinValue']}")
+                    if "MaxValue" in pdef and num > float(pdef["MaxValue"]):
+                        raise ValueError(f"Parameter '{pname}' value {val} exceeds maximum {pdef['MaxValue']}")
+                except ValueError:
+                    if "MinValue" in pdef or "MaxValue" in pdef:
+                        raise
+            if "MinLength" in pdef and len(str(val)) < int(pdef["MinLength"]):
+                raise ValueError(f"Parameter '{pname}' value is shorter than minimum length {pdef['MinLength']}")
+            if "MaxLength" in pdef and len(str(val)) > int(pdef["MaxLength"]):
+                raise ValueError(f"Parameter '{pname}' value exceeds maximum length {pdef['MaxLength']}")
+
         # 3. Evaluate conditions
         conditions = {}
         for cond_name, cond_def in template.get("Conditions", {}).items():
@@ -1272,10 +1334,23 @@ async def _do_create_stack(stack_name, template, params, tags):
             "mappings": template.get("Mappings", {}),
         }
 
+        # Resource types to silently skip (CDK metadata, etc.)
+        _SKIP_TYPES = {"AWS::CDK::Metadata", "AWS::CloudFormation::WaitConditionHandle"}
+
         for lid in ordered:
             rdef = active_resources[lid]
             rtype = rdef.get("Type", "")
             props = rdef.get("Properties", {})
+
+            # Silently skip CDK metadata and other non-provisioned types
+            if rtype in _SKIP_TYPES:
+                stub_id = f"{stack_name}-{lid}-skipped"
+                created_resources[lid] = {"physical_id": stub_id, "ref": stub_id, "attrs": {}}
+                stack["Resources"][lid] = {
+                    "LogicalResourceId": lid, "PhysicalResourceId": stub_id,
+                    "ResourceType": rtype, "ResourceStatus": "CREATE_COMPLETE", "Timestamp": _now(),
+                }
+                continue
 
             _add_event(stack, lid, rtype, "CREATE_IN_PROGRESS")
 
@@ -1289,12 +1364,21 @@ async def _do_create_stack(stack_name, template, params, tags):
                         "PhysicalResourceId": result["physical_id"],
                         "ResourceType": rtype,
                         "ResourceStatus": "CREATE_COMPLETE",
+                        "ResourceStatusReason": "",
                         "Timestamp": _now(),
                     }
                     stack["creation_order"].append(lid)
                     _add_event(stack, lid, rtype, "CREATE_COMPLETE")
                 except Exception as e:
                     logger.error("Failed to create resource %s (%s): %s", lid, rtype, e)
+                    stack["Resources"][lid] = {
+                        "LogicalResourceId": lid,
+                        "PhysicalResourceId": "",
+                        "ResourceType": rtype,
+                        "ResourceStatus": "CREATE_FAILED",
+                        "ResourceStatusReason": str(e),
+                        "Timestamp": _now(),
+                    }
                     _add_event(stack, lid, rtype, "CREATE_FAILED", str(e))
                     raise
             else:
@@ -1573,6 +1657,7 @@ def _act_describe_stack_resource(params):
         f"<PhysicalResourceId>{_esc(res.get('PhysicalResourceId', ''))}</PhysicalResourceId>"
         f"<ResourceType>{_esc(res.get('ResourceType', ''))}</ResourceType>"
         f"<ResourceStatus>{_esc(res.get('ResourceStatus', ''))}</ResourceStatus>"
+        f"<ResourceStatusReason>{_esc(res.get('ResourceStatusReason', ''))}</ResourceStatusReason>"
         f"<Timestamp>{_esc(res.get('Timestamp', ''))}</Timestamp>"
         f"<StackId>{_esc(stack['StackId'])}</StackId>"
         f"<StackName>{_esc(stack['StackName'])}</StackName>"
@@ -1595,6 +1680,7 @@ def _act_describe_stack_resources(params):
             f"<PhysicalResourceId>{_esc(res.get('PhysicalResourceId', ''))}</PhysicalResourceId>"
             f"<ResourceType>{_esc(res.get('ResourceType', ''))}</ResourceType>"
             f"<ResourceStatus>{_esc(res.get('ResourceStatus', ''))}</ResourceStatus>"
+            f"<ResourceStatusReason>{_esc(res.get('ResourceStatusReason', ''))}</ResourceStatusReason>"
             f"<Timestamp>{_esc(res.get('Timestamp', ''))}</Timestamp>"
             f"</member>"
         )
