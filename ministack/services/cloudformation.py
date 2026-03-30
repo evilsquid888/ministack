@@ -950,6 +950,160 @@ async def _create_apigateway_restapi(logical_id, props, ctx):
     }
 
 
+async def _create_ec2_route_table(logical_id, props, ctx):
+    resolved = _resolve(props, ctx)
+    vpc_id = resolved.get("VpcId", "")
+    form_body = urlencode({"Action": "CreateRouteTable", "VpcId": vpc_id}).encode()
+    status, _, resp = await ec2.handle_request(
+        "POST", "/", {"content-type": "application/x-www-form-urlencoded"}, form_body, {}
+    )
+    rtb_id = _xml_extract(resp, "routeTableId")
+    if not rtb_id:
+        rtb_id = f"rtb-{str(uuid4()).replace('-', '')[:12]}"
+    return {"physical_id": rtb_id, "ref": rtb_id, "attrs": {"RouteTableId": rtb_id}}
+
+
+async def _create_ec2_route(logical_id, props, ctx):
+    resolved = _resolve(props, ctx)
+    params = {
+        "Action": "CreateRoute",
+        "RouteTableId": resolved.get("RouteTableId", ""),
+        "DestinationCidrBlock": resolved.get("DestinationCidrBlock", ""),
+    }
+    if resolved.get("GatewayId"):
+        params["GatewayId"] = resolved["GatewayId"]
+    if resolved.get("NatGatewayId"):
+        params["NatGatewayId"] = resolved["NatGatewayId"]
+    if resolved.get("InstanceId"):
+        params["InstanceId"] = resolved["InstanceId"]
+    form_body = urlencode(params).encode()
+    status, _, resp = await ec2.handle_request(
+        "POST", "/", {"content-type": "application/x-www-form-urlencoded"}, form_body, {}
+    )
+    pid = f"{resolved.get('RouteTableId', '')}-{resolved.get('DestinationCidrBlock', '')}"
+    return {"physical_id": pid, "ref": pid, "attrs": {}}
+
+
+async def _create_ec2_internet_gateway(logical_id, props, ctx):
+    form_body = urlencode({"Action": "CreateInternetGateway"}).encode()
+    status, _, resp = await ec2.handle_request(
+        "POST", "/", {"content-type": "application/x-www-form-urlencoded"}, form_body, {}
+    )
+    igw_id = _xml_extract(resp, "internetGatewayId")
+    if not igw_id:
+        igw_id = f"igw-{str(uuid4()).replace('-', '')[:12]}"
+    return {"physical_id": igw_id, "ref": igw_id, "attrs": {"InternetGatewayId": igw_id}}
+
+
+async def _create_ec2_vpc_gateway_attachment(logical_id, props, ctx):
+    resolved = _resolve(props, ctx)
+    vpc_id = resolved.get("VpcId", "")
+    igw_id = resolved.get("InternetGatewayId", "")
+    form_body = urlencode({
+        "Action": "AttachInternetGateway", "VpcId": vpc_id, "InternetGatewayId": igw_id
+    }).encode()
+    await ec2.handle_request(
+        "POST", "/", {"content-type": "application/x-www-form-urlencoded"}, form_body, {}
+    )
+    pid = f"{vpc_id}-{igw_id}"
+    return {"physical_id": pid, "ref": pid, "attrs": {}}
+
+
+async def _create_ec2_subnet_route_table_assoc(logical_id, props, ctx):
+    resolved = _resolve(props, ctx)
+    subnet_id = resolved.get("SubnetId", "")
+    rtb_id = resolved.get("RouteTableId", "")
+    form_body = urlencode({
+        "Action": "AssociateRouteTable", "SubnetId": subnet_id, "RouteTableId": rtb_id
+    }).encode()
+    status, _, resp = await ec2.handle_request(
+        "POST", "/", {"content-type": "application/x-www-form-urlencoded"}, form_body, {}
+    )
+    assoc_id = _xml_extract(resp, "associationId")
+    if not assoc_id:
+        assoc_id = f"rtbassoc-{str(uuid4()).replace('-', '')[:8]}"
+    return {"physical_id": assoc_id, "ref": assoc_id, "attrs": {}}
+
+
+async def _create_ec2_security_group_ingress(logical_id, props, ctx):
+    resolved = _resolve(props, ctx)
+    params = {"Action": "AuthorizeSecurityGroupIngress", "GroupId": resolved.get("GroupId", "")}
+    params["IpPermissions.1.IpProtocol"] = resolved.get("IpProtocol", "tcp")
+    params["IpPermissions.1.FromPort"] = str(resolved.get("FromPort", 0))
+    params["IpPermissions.1.ToPort"] = str(resolved.get("ToPort", 0))
+    if resolved.get("CidrIp"):
+        params["IpPermissions.1.IpRanges.1.CidrIp"] = resolved["CidrIp"]
+    if resolved.get("SourceSecurityGroupId"):
+        params["IpPermissions.1.UserIdGroupPairs.1.GroupId"] = resolved["SourceSecurityGroupId"]
+    form_body = urlencode(params).encode()
+    await ec2.handle_request(
+        "POST", "/", {"content-type": "application/x-www-form-urlencoded"}, form_body, {}
+    )
+    pid = f"{resolved.get('GroupId', '')}-ingress-{logical_id}"
+    return {"physical_id": pid, "ref": pid, "attrs": {}}
+
+
+async def _create_ec2_instance(logical_id, props, ctx):
+    resolved = _resolve(props, ctx)
+    params = {
+        "Action": "RunInstances",
+        "ImageId": resolved.get("ImageId", "ami-00000000"),
+        "InstanceType": resolved.get("InstanceType", "t3.micro"),
+        "MinCount": "1", "MaxCount": "1",
+    }
+    if resolved.get("SubnetId"):
+        params["SubnetId"] = resolved["SubnetId"]
+    if resolved.get("SecurityGroupIds"):
+        for i, sg in enumerate(resolved["SecurityGroupIds"], 1):
+            params[f"SecurityGroupId.{i}"] = sg
+    if resolved.get("KeyName"):
+        params["KeyName"] = resolved["KeyName"]
+    if resolved.get("IamInstanceProfile"):
+        profile = resolved["IamInstanceProfile"]
+        if isinstance(profile, dict):
+            if profile.get("Arn"):
+                params["IamInstanceProfile.Arn"] = profile["Arn"]
+            elif profile.get("Name"):
+                params["IamInstanceProfile.Name"] = profile["Name"]
+    form_body = urlencode(params).encode()
+    status, _, resp = await ec2.handle_request(
+        "POST", "/", {"content-type": "application/x-www-form-urlencoded"}, form_body, {}
+    )
+    instance_id = _xml_extract(resp, "instanceId")
+    if not instance_id:
+        instance_id = f"i-{str(uuid4()).replace('-', '')[:12]}"
+    return {
+        "physical_id": instance_id, "ref": instance_id,
+        "attrs": {
+            "InstanceId": instance_id,
+            "PrivateIp": _xml_extract(resp, "privateIpAddress") or "10.0.0.1",
+            "PublicIp": _xml_extract(resp, "ipAddress") or "",
+            "AvailabilityZone": _xml_extract(resp, "availabilityZone") or f"{REGION}a",
+        },
+    }
+
+
+async def _create_iam_instance_profile(logical_id, props, ctx):
+    resolved = _resolve(props, ctx)
+    profile_name = resolved.get("InstanceProfileName", f"{ctx['stack_name']}-{logical_id}")
+    form_body = urlencode({"Action": "CreateInstanceProfile", "InstanceProfileName": profile_name}).encode()
+    status, _, resp = await handle_iam_request(
+        "POST", "/", {"content-type": "application/x-www-form-urlencoded"}, form_body, {}
+    )
+    arn = _xml_extract(resp, "Arn") or f"arn:aws:iam::{ACCOUNT_ID}:instance-profile/{profile_name}"
+    # Add roles
+    for role_name in resolved.get("Roles", []):
+        add_body = urlencode({
+            "Action": "AddRoleToInstanceProfile",
+            "InstanceProfileName": profile_name,
+            "RoleName": role_name if isinstance(role_name, str) else str(role_name),
+        }).encode()
+        await handle_iam_request(
+            "POST", "/", {"content-type": "application/x-www-form-urlencoded"}, add_body, {}
+        )
+    return {"physical_id": profile_name, "ref": profile_name, "attrs": {"Arn": arn}}
+
+
 # Register all resource creators
 _RESOURCE_CREATORS = {
     "AWS::S3::Bucket": _create_s3_bucket,
@@ -971,6 +1125,14 @@ _RESOURCE_CREATORS = {
     "AWS::EC2::VPC": _create_ec2_vpc,
     "AWS::EC2::Subnet": _create_ec2_subnet,
     "AWS::EC2::SecurityGroup": _create_ec2_security_group,
+    "AWS::EC2::RouteTable": _create_ec2_route_table,
+    "AWS::EC2::Route": _create_ec2_route,
+    "AWS::EC2::InternetGateway": _create_ec2_internet_gateway,
+    "AWS::EC2::VPCGatewayAttachment": _create_ec2_vpc_gateway_attachment,
+    "AWS::EC2::SubnetRouteTableAssociation": _create_ec2_subnet_route_table_assoc,
+    "AWS::EC2::SecurityGroupIngress": _create_ec2_security_group_ingress,
+    "AWS::EC2::Instance": _create_ec2_instance,
+    "AWS::IAM::InstanceProfile": _create_iam_instance_profile,
     "AWS::ApiGateway::RestApi": _create_apigateway_restapi,
 }
 
@@ -1183,6 +1345,84 @@ async def _delete_apigateway_restapi(physical_id, resource_type, ctx):
         logger.warning("Failed to delete REST API %s: %s", physical_id, e)
 
 
+async def _delete_ec2_route_table(physical_id, resource_type, ctx):
+    try:
+        form_body = urlencode({"Action": "DeleteRouteTable", "RouteTableId": physical_id}).encode()
+        await ec2.handle_request("POST", "/", {"content-type": "application/x-www-form-urlencoded"}, form_body, {})
+    except Exception as e:
+        logger.warning("Failed to delete route table %s: %s", physical_id, e)
+
+
+async def _delete_ec2_route(physical_id, resource_type, ctx):
+    try:
+        parts = physical_id.split("-", 1) if "-" in physical_id else [physical_id, ""]
+        # Route physical_id format: "rtb-xxx-cidr" — extract RouteTableId and CIDR
+        # Better: parse from the stored physical_id which is "rtb_id-cidr"
+        idx = physical_id.find("-0.") if "-0." in physical_id else physical_id.find("-10.") if "-10." in physical_id else -1
+        if idx > 0:
+            rtb_id = physical_id[:idx]
+            cidr = physical_id[idx+1:]
+        else:
+            rtb_id = physical_id
+            cidr = "0.0.0.0/0"
+        form_body = urlencode({"Action": "DeleteRoute", "RouteTableId": rtb_id, "DestinationCidrBlock": cidr}).encode()
+        await ec2.handle_request("POST", "/", {"content-type": "application/x-www-form-urlencoded"}, form_body, {})
+    except Exception as e:
+        logger.warning("Failed to delete route %s: %s", physical_id, e)
+
+
+async def _delete_ec2_internet_gateway(physical_id, resource_type, ctx):
+    try:
+        form_body = urlencode({"Action": "DeleteInternetGateway", "InternetGatewayId": physical_id}).encode()
+        await ec2.handle_request("POST", "/", {"content-type": "application/x-www-form-urlencoded"}, form_body, {})
+    except Exception as e:
+        logger.warning("Failed to delete internet gateway %s: %s", physical_id, e)
+
+
+async def _delete_ec2_vpc_gateway_attachment(physical_id, resource_type, ctx):
+    try:
+        # physical_id format: "vpc-xxx-igw-xxx"
+        parts = physical_id.split("-igw-")
+        if len(parts) == 2:
+            vpc_id = parts[0]
+            igw_id = "igw-" + parts[1]
+        else:
+            return  # Can't parse, skip
+        form_body = urlencode({"Action": "DetachInternetGateway", "VpcId": vpc_id, "InternetGatewayId": igw_id}).encode()
+        await ec2.handle_request("POST", "/", {"content-type": "application/x-www-form-urlencoded"}, form_body, {})
+    except Exception as e:
+        logger.warning("Failed to detach internet gateway %s: %s", physical_id, e)
+
+
+async def _delete_ec2_subnet_route_table_assoc(physical_id, resource_type, ctx):
+    try:
+        form_body = urlencode({"Action": "DisassociateRouteTable", "AssociationId": physical_id}).encode()
+        await ec2.handle_request("POST", "/", {"content-type": "application/x-www-form-urlencoded"}, form_body, {})
+    except Exception as e:
+        logger.warning("Failed to disassociate route table %s: %s", physical_id, e)
+
+
+async def _delete_ec2_security_group_ingress(physical_id, resource_type, ctx):
+    # Best-effort: SG ingress rules are part of the SG, which gets deleted separately
+    pass
+
+
+async def _delete_ec2_instance(physical_id, resource_type, ctx):
+    try:
+        form_body = urlencode({"Action": "TerminateInstances", "InstanceId.1": physical_id}).encode()
+        await ec2.handle_request("POST", "/", {"content-type": "application/x-www-form-urlencoded"}, form_body, {})
+    except Exception as e:
+        logger.warning("Failed to terminate instance %s: %s", physical_id, e)
+
+
+async def _delete_iam_instance_profile(physical_id, resource_type, ctx):
+    try:
+        form_body = urlencode({"Action": "DeleteInstanceProfile", "InstanceProfileName": physical_id}).encode()
+        await handle_iam_request("POST", "/", {"content-type": "application/x-www-form-urlencoded"}, form_body, {})
+    except Exception as e:
+        logger.warning("Failed to delete instance profile %s: %s", physical_id, e)
+
+
 _RESOURCE_DELETERS = {
     "AWS::S3::Bucket": _delete_s3_bucket,
     "AWS::S3::BucketPolicy": _delete_s3_bucket_policy,
@@ -1203,6 +1443,14 @@ _RESOURCE_DELETERS = {
     "AWS::EC2::VPC": _delete_ec2_vpc,
     "AWS::EC2::Subnet": _delete_ec2_subnet,
     "AWS::EC2::SecurityGroup": _delete_ec2_security_group,
+    "AWS::EC2::RouteTable": _delete_ec2_route_table,
+    "AWS::EC2::Route": _delete_ec2_route,
+    "AWS::EC2::InternetGateway": _delete_ec2_internet_gateway,
+    "AWS::EC2::VPCGatewayAttachment": _delete_ec2_vpc_gateway_attachment,
+    "AWS::EC2::SubnetRouteTableAssociation": _delete_ec2_subnet_route_table_assoc,
+    "AWS::EC2::SecurityGroupIngress": _delete_ec2_security_group_ingress,
+    "AWS::EC2::Instance": _delete_ec2_instance,
+    "AWS::IAM::InstanceProfile": _delete_iam_instance_profile,
     "AWS::ApiGateway::RestApi": _delete_apigateway_restapi,
 }
 
