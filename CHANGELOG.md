@@ -7,6 +7,21 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.2.0] — 2026-03-27
+
+### Added
+- **AWS CloudFormation** (`ministack/services/cloudformation.py`) — full stack orchestration engine
+  - **Stack Operations**: `CreateStack`, `DeleteStack`, `UpdateStack`, `DescribeStacks`, `DescribeStackResource`, `DescribeStackResources`, `DescribeStackEvents`, `ListStacks`, `ListStackResources`, `GetTemplate`, `GetTemplateSummary`, `ValidateTemplate`
+  - **Change Sets**: `CreateChangeSet`, `DescribeChangeSet`, `ExecuteChangeSet`, `DeleteChangeSet`, `ListChangeSets`
+  - **19 Resource Types**: `AWS::S3::Bucket`, `AWS::S3::BucketPolicy`, `AWS::DynamoDB::Table`, `AWS::Lambda::Function`, `AWS::Lambda::Permission`, `AWS::Lambda::EventSourceMapping`, `AWS::SQS::Queue`, `AWS::SNS::Topic`, `AWS::SNS::Subscription`, `AWS::IAM::Role`, `AWS::IAM::Policy`, `AWS::Events::Rule`, `AWS::Logs::LogGroup`, `AWS::SecretsManager::Secret`, `AWS::SSM::Parameter`, `AWS::StepFunctions::StateMachine`, `AWS::EC2::VPC`, `AWS::EC2::Subnet`, `AWS::EC2::SecurityGroup`
+  - **Intrinsic Functions**: `Ref`, `Fn::GetAtt`, `Fn::Sub`, `Fn::Join`, `Fn::Select`, `Fn::Split`, `Fn::If`, `Fn::Equals`, `Fn::And`, `Fn::Or`, `Fn::Not`, `Fn::FindInMap`, `Fn::GetAZs`, `Fn::Base64`
+  - **Template Parsing**: JSON and YAML (with CloudFormation shorthand tags like `!Ref`, `!Sub`, `!GetAtt`)
+  - **Dependency Resolution**: Topological sort with cycle detection; `DependsOn` and implicit reference scanning
+  - **Rollback**: Automatic rollback on creation failure (deletes created resources in reverse order)
+  - 13 integration tests
+
+---
+
 ## [1.1.1] — 2026-03-29
 
 ### Added
