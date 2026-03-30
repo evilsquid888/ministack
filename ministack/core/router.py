@@ -123,6 +123,9 @@ SERVICE_PATTERNS = {
                           r"Action=.*Image", r"Action=.*Tag", r"Action=.*InternetGateway",
                           r"Action=.*AvailabilityZone"],
     },
+    "cloudformation": {
+        "host_patterns": [r"cloudformation\."],
+    },
 }
 
 
@@ -165,6 +168,7 @@ def detect_service(method: str, path: str, headers: dict, query_params: dict) ->
                 "route53": "route53",
                 "cognito-idp": "cognito-idp",
                 "cognito-identity": "cognito-identity",
+                "cloudformation": "cloudformation",
             }
             if svc_name in scope_map:
                 return scope_map[svc_name]
@@ -300,6 +304,16 @@ def detect_service(method: str, path: str, headers: dict, query_params: dict) ->
             "AttachNetworkInterface": "ec2", "DetachNetworkInterface": "ec2",
             "CreateVpcEndpoint": "ec2", "DeleteVpcEndpoints": "ec2",
             "DescribeVpcEndpoints": "ec2",
+            # CloudFormation actions
+            "CreateStack": "cloudformation", "DeleteStack": "cloudformation",
+            "UpdateStack": "cloudformation", "DescribeStacks": "cloudformation",
+            "DescribeStackResource": "cloudformation", "DescribeStackResources": "cloudformation",
+            "DescribeStackEvents": "cloudformation", "ListStacks": "cloudformation",
+            "ListStackResources": "cloudformation", "GetTemplate": "cloudformation",
+            "GetTemplateSummary": "cloudformation", "ValidateTemplate": "cloudformation",
+            "CreateChangeSet": "cloudformation", "DescribeChangeSet": "cloudformation",
+            "ExecuteChangeSet": "cloudformation", "DeleteChangeSet": "cloudformation",
+            "ListChangeSets": "cloudformation",
         }
         if action in action_service_map:
             return action_service_map[action]

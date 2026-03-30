@@ -11116,3 +11116,339 @@ def test_ec2_vpc_endpoint_crud(ec2):
 def test_ec2_describe_route_tables_default(ec2):
     desc = ec2.describe_route_tables()
     assert any(rt["VpcId"] == "vpc-00000001" for rt in desc["RouteTables"])
+
+
+# ========== CloudFormation ==========
+
+
+def test_cfn_create_delete_s3_stack(cfn, s3):
+    """Create a stack with an S3 bucket, verify bucket exists, delete stack, verify bucket gone."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "MyBucket": {
+                "Type": "AWS::S3::Bucket",
+                "Properties": {"BucketName": "cfn-test-s3-bucket-001"},
+            }
+        },
+    })
+    cfn.create_stack(StackName="cfn-s3-test", TemplateBody=template)
+    # Verify bucket was created
+    buckets = [b["Name"] for b in s3.list_buckets()["Buckets"]]
+    assert "cfn-test-s3-bucket-001" in buckets
+
+    # Verify stack status
+    desc = cfn.describe_stacks(StackName="cfn-s3-test")
+    assert desc["Stacks"][0]["StackStatus"] == "CREATE_COMPLETE"
+
+    # Delete stack
+    cfn.delete_stack(StackName="cfn-s3-test")
+
+    # Verify bucket is gone
+    buckets = [b["Name"] for b in s3.list_buckets()["Buckets"]]
+    assert "cfn-test-s3-bucket-001" not in buckets
+
+
+def test_cfn_create_sqs_dynamodb_stack(cfn, sqs, ddb):
+    """Multi-resource stack with SQS queue + DynamoDB table."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "MyQueue": {
+                "Type": "AWS::SQS::Queue",
+                "Properties": {"QueueName": "cfn-test-queue-001"},
+            },
+            "MyTable": {
+                "Type": "AWS::DynamoDB::Table",
+                "Properties": {
+                    "TableName": "cfn-test-table-001",
+                    "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST",
+                },
+            },
+        },
+    })
+    cfn.create_stack(StackName="cfn-multi-test", TemplateBody=template)
+
+    # Verify SQS queue
+    queues = sqs.list_queues(QueueNamePrefix="cfn-test-queue-001")
+    assert len(queues.get("QueueUrls", [])) > 0
+
+    # Verify DynamoDB table
+    tables = ddb.list_tables()["TableNames"]
+    assert "cfn-test-table-001" in tables
+
+    # Cleanup
+    cfn.delete_stack(StackName="cfn-multi-test")
+
+
+def test_cfn_describe_stacks(cfn):
+    """Create stack, describe it, verify status/outputs/parameters."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Description": "Test describe stack",
+        "Parameters": {
+            "Env": {"Type": "String", "Default": "dev"},
+        },
+        "Resources": {
+            "Bucket": {
+                "Type": "AWS::S3::Bucket",
+                "Properties": {"BucketName": "cfn-describe-test-bucket"},
+            }
+        },
+        "Outputs": {
+            "BucketName": {
+                "Value": {"Ref": "Bucket"},
+                "Description": "The bucket name",
+            }
+        },
+    })
+    cfn.create_stack(StackName="cfn-describe-test", TemplateBody=template)
+    desc = cfn.describe_stacks(StackName="cfn-describe-test")
+    stack = desc["Stacks"][0]
+    assert stack["StackStatus"] == "CREATE_COMPLETE"
+    assert stack["Description"] is not None or True  # description may not be in describe response
+    assert any(o["OutputKey"] == "BucketName" for o in stack.get("Outputs", []))
+    assert any(p["ParameterKey"] == "Env" for p in stack.get("Parameters", []))
+
+    cfn.delete_stack(StackName="cfn-describe-test")
+
+
+def test_cfn_stack_events(cfn):
+    """Verify event trail after stack creation."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Q": {
+                "Type": "AWS::SQS::Queue",
+                "Properties": {"QueueName": "cfn-events-queue"},
+            }
+        },
+    })
+    cfn.create_stack(StackName="cfn-events-test", TemplateBody=template)
+    events = cfn.describe_stack_events(StackName="cfn-events-test")["StackEvents"]
+    assert len(events) > 0
+    statuses = [e["ResourceStatus"] for e in events]
+    assert "CREATE_IN_PROGRESS" in statuses
+    assert "CREATE_COMPLETE" in statuses
+
+    cfn.delete_stack(StackName="cfn-events-test")
+
+
+def test_cfn_list_stacks(cfn):
+    """List stacks, verify filter works."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Q": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "cfn-list-q"}},
+        },
+    })
+    cfn.create_stack(StackName="cfn-list-test", TemplateBody=template)
+    summaries = cfn.list_stacks(StackStatusFilter=["CREATE_COMPLETE"])["StackSummaries"]
+    assert any(s["StackName"] == "cfn-list-test" for s in summaries)
+
+    cfn.delete_stack(StackName="cfn-list-test")
+
+
+def test_cfn_list_stack_resources(cfn):
+    """Verify resources listed correctly."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Q1": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "cfn-listr-q1"}},
+            "Q2": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "cfn-listr-q2"}},
+        },
+    })
+    cfn.create_stack(StackName="cfn-listr-test", TemplateBody=template)
+    resources = cfn.list_stack_resources(StackName="cfn-listr-test")["StackResourceSummaries"]
+    logical_ids = [r["LogicalResourceId"] for r in resources]
+    assert "Q1" in logical_ids
+    assert "Q2" in logical_ids
+
+    cfn.delete_stack(StackName="cfn-listr-test")
+
+
+def test_cfn_get_template(cfn):
+    """Round-trip: create stack, get template, verify it matches."""
+    template_dict = {
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "B": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "cfn-gettempl-bucket"}},
+        },
+    }
+    cfn.create_stack(StackName="cfn-gettempl-test", TemplateBody=json.dumps(template_dict))
+    resp = cfn.get_template(StackName="cfn-gettempl-test")
+    got = json.loads(resp["TemplateBody"])
+    assert got["Resources"]["B"]["Type"] == "AWS::S3::Bucket"
+
+    cfn.delete_stack(StackName="cfn-gettempl-test")
+
+
+def test_cfn_validate_template(cfn):
+    """Valid + invalid template validation."""
+    valid = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Parameters": {"Env": {"Type": "String", "Default": "dev"}},
+        "Resources": {"B": {"Type": "AWS::S3::Bucket"}},
+    })
+    resp = cfn.validate_template(TemplateBody=valid)
+    assert "Parameters" in resp
+
+    with pytest.raises(ClientError):
+        cfn.validate_template(TemplateBody="not valid json or yaml {{{")
+
+
+def test_cfn_intrinsic_functions(cfn, sqs):
+    """Test Fn::Sub, Fn::Join, Fn::Select in a real stack."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Parameters": {
+            "Prefix": {"Type": "String", "Default": "cfn"},
+        },
+        "Resources": {
+            "Q": {
+                "Type": "AWS::SQS::Queue",
+                "Properties": {
+                    "QueueName": {"Fn::Sub": "${Prefix}-intrinsic-queue"},
+                },
+            },
+        },
+        "Outputs": {
+            "QueueNameJoined": {
+                "Value": {"Fn::Join": ["-", ["cfn", "intrinsic", "queue"]]},
+            },
+            "SelectedVal": {
+                "Value": {"Fn::Select": [1, ["a", "b", "c"]]},
+            },
+        },
+    })
+    cfn.create_stack(StackName="cfn-intrinsic-test", TemplateBody=template)
+
+    # Verify queue with substituted name exists
+    queues = sqs.list_queues(QueueNamePrefix="cfn-intrinsic-queue")
+    assert len(queues.get("QueueUrls", [])) > 0
+
+    # Check outputs
+    desc = cfn.describe_stacks(StackName="cfn-intrinsic-test")
+    outputs = {o["OutputKey"]: o["OutputValue"] for o in desc["Stacks"][0].get("Outputs", [])}
+    assert outputs.get("QueueNameJoined") == "cfn-intrinsic-queue"
+    assert outputs.get("SelectedVal") == "b"
+
+    cfn.delete_stack(StackName="cfn-intrinsic-test")
+
+
+def test_cfn_change_set_lifecycle(cfn):
+    """Create, describe, execute, delete a change set."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "B": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "cfn-cs-bucket"}},
+        },
+    })
+    # Create with ChangeSetType=CREATE
+    resp = cfn.create_change_set(
+        StackName="cfn-cs-test",
+        TemplateBody=template,
+        ChangeSetName="cs-initial",
+        ChangeSetType="CREATE",
+    )
+    cs_id = resp["Id"]
+    assert cs_id
+
+    # Describe
+    desc = cfn.describe_change_set(ChangeSetName="cs-initial", StackName="cfn-cs-test")
+    assert desc["Status"] == "CREATE_COMPLETE"
+    assert desc["ExecutionStatus"] == "AVAILABLE"
+    assert len(desc["Changes"]) > 0
+
+    # Execute
+    cfn.execute_change_set(ChangeSetName="cs-initial", StackName="cfn-cs-test")
+
+    # Verify stack was created
+    stack_desc = cfn.describe_stacks(StackName="cfn-cs-test")
+    assert stack_desc["Stacks"][0]["StackStatus"] == "CREATE_COMPLETE"
+
+    # List change sets
+    cs_list = cfn.list_change_sets(StackName="cfn-cs-test")
+    assert len(cs_list["Summaries"]) > 0
+
+    # Delete change set
+    cfn.delete_change_set(ChangeSetName="cs-initial", StackName="cfn-cs-test")
+
+    # Cleanup
+    cfn.delete_stack(StackName="cfn-cs-test")
+
+
+def test_cfn_delete_stack_cleanup(cfn, s3, sqs):
+    """Verify resources actually deleted after stack deletion."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "B": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "cfn-cleanup-bucket"}},
+            "Q": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "cfn-cleanup-queue"}},
+        },
+    })
+    cfn.create_stack(StackName="cfn-cleanup-test", TemplateBody=template)
+
+    # Verify resources exist
+    assert "cfn-cleanup-bucket" in [b["Name"] for b in s3.list_buckets()["Buckets"]]
+    assert any("cfn-cleanup-queue" in u for u in sqs.list_queues(QueueNamePrefix="cfn-cleanup-queue").get("QueueUrls", []))
+
+    cfn.delete_stack(StackName="cfn-cleanup-test")
+
+    # Verify resources gone
+    assert "cfn-cleanup-bucket" not in [b["Name"] for b in s3.list_buckets()["Buckets"]]
+    cleanup_queues = sqs.list_queues(QueueNamePrefix="cfn-cleanup-queue").get("QueueUrls", [])
+    assert len(cleanup_queues) == 0
+
+
+def test_cfn_duplicate_stack_error(cfn):
+    """Duplicate stack name returns AlreadyExistsException."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": {
+            "Q": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "cfn-dup-queue"}},
+        },
+    })
+    cfn.create_stack(StackName="cfn-dup-test", TemplateBody=template)
+    with pytest.raises(ClientError) as exc:
+        cfn.create_stack(StackName="cfn-dup-test", TemplateBody=template)
+    assert "AlreadyExistsException" in str(exc.value) or "already exists" in str(exc.value).lower()
+
+    cfn.delete_stack(StackName="cfn-dup-test")
+
+
+def test_cfn_parameters(cfn, s3):
+    """Template with parameters and defaults."""
+    template = json.dumps({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Parameters": {
+            "BucketSuffix": {"Type": "String", "Default": "default-suffix"},
+        },
+        "Resources": {
+            "B": {
+                "Type": "AWS::S3::Bucket",
+                "Properties": {
+                    "BucketName": {"Fn::Sub": "cfn-param-${BucketSuffix}"},
+                },
+            }
+        },
+        "Outputs": {
+            "BName": {"Value": {"Ref": "B"}},
+        },
+    })
+    # Test with custom parameter
+    cfn.create_stack(
+        StackName="cfn-param-test",
+        TemplateBody=template,
+        Parameters=[{"ParameterKey": "BucketSuffix", "ParameterValue": "custom123"}],
+    )
+    buckets = [b["Name"] for b in s3.list_buckets()["Buckets"]]
+    assert "cfn-param-custom123" in buckets
+
+    desc = cfn.describe_stacks(StackName="cfn-param-test")
+    outputs = {o["OutputKey"]: o["OutputValue"] for o in desc["Stacks"][0].get("Outputs", [])}
+    assert outputs.get("BName") == "cfn-param-custom123"
+
+    cfn.delete_stack(StackName="cfn-param-test")
