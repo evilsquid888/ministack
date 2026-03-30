@@ -1,7 +1,5 @@
 # MiniStack — Free, Open-Source Local AWS Emulator
 
-
-
 > **LocalStack is no longer free.** MiniStack is a fully open-source, zero-cost drop-in replacement.
 > Single port · No account · No license key · No telemetry · Just AWS APIs, locally.
 
@@ -13,7 +11,6 @@
 ![Python](https://img.shields.io/badge/python-3.12-blue)
 ![GitHub stars](https://img.shields.io/github/stars/Nahuel990/ministack)
 
-
 <p align="center">
   <img src="ministack1.png" alt="MiniStack in action" width="700"/>
 </p>
@@ -24,7 +21,11 @@
 
 LocalStack recently moved its core services behind a paid plan. If you relied on LocalStack Community for local development and CI/CD pipelines, MiniStack is your free alternative.
 
+<<<<<<< HEAD
 - **27 AWS services** emulated on a single port (4566)
+=======
+- **30 AWS services** emulated on a single port (4566)
+>>>>>>> upstream/master
 - **Drop-in compatible** — works with `boto3`, AWS CLI, Terraform, CDK, Pulumi, any SDK
 - **Real infrastructure** — RDS spins up actual Postgres/MySQL containers, ElastiCache spins up real Redis, Athena runs real SQL via DuckDB, ECS runs real Docker containers
 - **Tiny footprint** — ~150MB image, ~30MB RAM at idle vs LocalStack's ~1GB image and ~500MB RAM
@@ -223,6 +224,7 @@ subnet = ec2.create_subnet(
 | **Step Functions** | CreateStateMachine, DeleteStateMachine, DescribeStateMachine, UpdateStateMachine, ListStateMachines, StartExecution, StartSyncExecution, StopExecution, DescribeExecution, DescribeStateMachineForExecution, ListExecutions, GetExecutionHistory, SendTaskSuccess, SendTaskFailure, SendTaskHeartbeat, CreateActivity, DeleteActivity, DescribeActivity, ListActivities, GetActivityTask, TagResource, UntagResource, ListTagsForResource | Full ASL interpreter; Retry/Catch; waitForTaskToken; Activities (worker pattern); Pass/Task/Choice/Wait/Succeed/Fail/Map/Parallel |
 | **API Gateway v2** | CreateApi, GetApi, GetApis, UpdateApi, DeleteApi, CreateRoute, GetRoute, GetRoutes, UpdateRoute, DeleteRoute, CreateIntegration, GetIntegration, GetIntegrations, UpdateIntegration, DeleteIntegration, CreateStage, GetStage, GetStages, UpdateStage, DeleteStage, CreateDeployment, GetDeployment, GetDeployments, DeleteDeployment, CreateAuthorizer, GetAuthorizer, GetAuthorizers, UpdateAuthorizer, DeleteAuthorizer, TagResource, UntagResource, GetTags | HTTP API (v2) protocol; Lambda proxy (AWS_PROXY) and HTTP proxy (HTTP_PROXY) integrations; data plane via `{apiId}.execute-api.localhost`; `{param}` and `{proxy+}` path matching; JWT/Lambda authorizer CRUD |
 | **API Gateway v1** | CreateRestApi, GetRestApi, GetRestApis, UpdateRestApi, DeleteRestApi, CreateResource, GetResource, GetResources, UpdateResource, DeleteResource, PutMethod, GetMethod, DeleteMethod, UpdateMethod, PutMethodResponse, GetMethodResponse, DeleteMethodResponse, PutIntegration, GetIntegration, DeleteIntegration, UpdateIntegration, PutIntegrationResponse, GetIntegrationResponse, DeleteIntegrationResponse, CreateDeployment, GetDeployment, GetDeployments, UpdateDeployment, DeleteDeployment, CreateStage, GetStage, GetStages, UpdateStage, DeleteStage, CreateAuthorizer, GetAuthorizer, GetAuthorizers, UpdateAuthorizer, DeleteAuthorizer, CreateModel, GetModel, GetModels, DeleteModel, CreateApiKey, GetApiKey, GetApiKeys, UpdateApiKey, DeleteApiKey, CreateUsagePlan, GetUsagePlan, GetUsagePlans, UpdateUsagePlan, DeleteUsagePlan, CreateUsagePlanKey, GetUsagePlanKeys, DeleteUsagePlanKey, CreateDomainName, GetDomainName, GetDomainNames, DeleteDomainName, CreateBasePathMapping, GetBasePathMapping, GetBasePathMappings, DeleteBasePathMapping, TagResource, UntagResource, GetTags | REST API (v1) protocol; Lambda proxy format 1.0 (AWS_PROXY), HTTP proxy (HTTP_PROXY), MOCK integration; data plane via `{apiId}.execute-api.localhost`; resource tree with `{param}` and `{proxy+}` path matching; JSON Patch for all PATCH operations; state persistence |
+| **ELBv2 / ALB** | CreateLoadBalancer, DescribeLoadBalancers, DeleteLoadBalancer, DescribeLoadBalancerAttributes, ModifyLoadBalancerAttributes, CreateTargetGroup, DescribeTargetGroups, ModifyTargetGroup, DeleteTargetGroup, DescribeTargetGroupAttributes, ModifyTargetGroupAttributes, CreateListener, DescribeListeners, ModifyListener, DeleteListener, CreateRule, DescribeRules, ModifyRule, DeleteRule, SetRulePriorities, RegisterTargets, DeregisterTargets, DescribeTargetHealth, AddTags, RemoveTags, DescribeTags | Control plane + data plane; ALB→Lambda live traffic routing; `path-pattern`, `host-header`, `http-method`, `query-string`, `http-header` rule conditions; `forward`, `redirect`, `fixed-response` actions; data plane via `{lb-name}.alb.localhost` Host header or `/_alb/{lb-name}/` path prefix |
 
 ### Infrastructure Services (with real Docker execution)
 
@@ -235,8 +237,15 @@ subnet = ec2.create_subnet(
 | **Athena** | StartQueryExecution, GetQueryExecution, GetQueryResults, StopQueryExecution, ListQueryExecutions, BatchGetQueryExecution, CreateWorkGroup, DeleteWorkGroup, GetWorkGroup, ListWorkGroups, UpdateWorkGroup, CreateNamedQuery, DeleteNamedQuery, GetNamedQuery, ListNamedQueries, BatchGetNamedQuery, CreateDataCatalog, GetDataCatalog, ListDataCatalogs, DeleteDataCatalog, UpdateDataCatalog, CreatePreparedStatement, GetPreparedStatement, DeletePreparedStatement, ListPreparedStatements, GetTableMetadata, ListTableMetadata, TagResource, UntagResource, ListTagsForResource | Real SQL via **DuckDB** when installed (`pip install duckdb`), otherwise returns mock results; result pagination; column type metadata |
 | **Firehose** | CreateDeliveryStream, DeleteDeliveryStream, DescribeDeliveryStream, ListDeliveryStreams, PutRecord, PutRecordBatch, UpdateDestination, TagDeliveryStream, UntagDeliveryStream, ListTagsForDeliveryStream, StartDeliveryStreamEncryption, StopDeliveryStreamEncryption | S3 destinations write records to the local S3 emulator; all other destination types buffer in-memory; concurrency-safe `UpdateDestination` via `VersionId` |
 | **Route53** | CreateHostedZone, GetHostedZone, DeleteHostedZone, ListHostedZones, ListHostedZonesByName, UpdateHostedZoneComment, ChangeResourceRecordSets (CREATE/UPSERT/DELETE), ListResourceRecordSets, GetChange, CreateHealthCheck, GetHealthCheck, DeleteHealthCheck, ListHealthChecks, UpdateHealthCheck, ChangeTagsForResource, ListTagsForResource | REST/XML protocol; SOA + NS records auto-created; CallerReference idempotency; alias records, weighted/failover/latency routing; marker-based pagination |
+<<<<<<< HEAD
 | **EC2** | RunInstances, DescribeInstances, TerminateInstances, StopInstances, StartInstances, RebootInstances, DescribeImages, CreateSecurityGroup, DeleteSecurityGroup, DescribeSecurityGroups, AuthorizeSecurityGroupIngress, RevokeSecurityGroupIngress, AuthorizeSecurityGroupEgress, RevokeSecurityGroupEgress, CreateKeyPair, DeleteKeyPair, DescribeKeyPairs, ImportKeyPair, CreateVpc, DeleteVpc, DescribeVpcs, ModifyVpcAttribute, CreateSubnet, DeleteSubnet, DescribeSubnets, ModifySubnetAttribute, CreateInternetGateway, DeleteInternetGateway, DescribeInternetGateways, AttachInternetGateway, DetachInternetGateway, CreateRouteTable, DeleteRouteTable, DescribeRouteTables, AssociateRouteTable, DisassociateRouteTable, CreateRoute, ReplaceRoute, DeleteRoute, CreateNetworkInterface, DeleteNetworkInterface, DescribeNetworkInterfaces, AttachNetworkInterface, DetachNetworkInterface, CreateVpcEndpoint, DeleteVpcEndpoints, DescribeVpcEndpoints, DescribeAvailabilityZones, AllocateAddress, ReleaseAddress, AssociateAddress, DisassociateAddress, DescribeAddresses, CreateTags, DeleteTags, DescribeTags | In-memory state only — no real VMs; default VPC, subnet, security group, internet gateway, and route table always present; rules stored but not enforced (matches LocalStack) |
 | **CloudFormation** | CreateStack, DeleteStack, UpdateStack, DescribeStacks, DescribeStackResource, DescribeStackResources, DescribeStackEvents, ListStacks, ListStackResources, GetTemplate, GetTemplateSummary, ValidateTemplate, CreateChangeSet, DescribeChangeSet, ExecuteChangeSet, DeleteChangeSet, ListChangeSets | Stack orchestration across 19 resource types (S3, SQS, SNS, DynamoDB, Lambda, IAM, EC2, EventBridge, CloudWatch Logs, SecretsManager, SSM, Step Functions); intrinsic functions (Ref, Fn::Sub, Fn::Join, Fn::Select, Fn::Split, Fn::GetAtt, Fn::If, Fn::FindInMap, etc.); dependency resolution with topological sort; change sets; rollback on failure |
+=======
+| **EC2** | RunInstances, DescribeInstances, TerminateInstances, StopInstances, StartInstances, RebootInstances, DescribeImages, CreateSecurityGroup, DeleteSecurityGroup, DescribeSecurityGroups, AuthorizeSecurityGroupIngress, RevokeSecurityGroupIngress, AuthorizeSecurityGroupEgress, RevokeSecurityGroupEgress, CreateKeyPair, DeleteKeyPair, DescribeKeyPairs, ImportKeyPair, CreateVpc, DeleteVpc, DescribeVpcs, ModifyVpcAttribute, CreateSubnet, DeleteSubnet, DescribeSubnets, ModifySubnetAttribute, CreateInternetGateway, DeleteInternetGateway, DescribeInternetGateways, AttachInternetGateway, DetachInternetGateway, CreateRouteTable, DeleteRouteTable, DescribeRouteTables, AssociateRouteTable, DisassociateRouteTable, CreateRoute, ReplaceRoute, DeleteRoute, CreateNetworkInterface, DeleteNetworkInterface, DescribeNetworkInterfaces, AttachNetworkInterface, DetachNetworkInterface, CreateVpcEndpoint, DeleteVpcEndpoints, DescribeVpcEndpoints, DescribeAvailabilityZones, AllocateAddress, ReleaseAddress, AssociateAddress, DisassociateAddress, DescribeAddresses, CreateTags, DeleteTags, DescribeTags, CreateNatGateway, DescribeNatGateways, DeleteNatGateway, CreateNetworkAcl, DescribeNetworkAcls, DeleteNetworkAcl, CreateNetworkAclEntry, DeleteNetworkAclEntry, ReplaceNetworkAclEntry, ReplaceNetworkAclAssociation, CreateFlowLogs, DescribeFlowLogs, DeleteFlowLogs, CreateVpcPeeringConnection, AcceptVpcPeeringConnection, DescribeVpcPeeringConnections, DeleteVpcPeeringConnection, CreateDhcpOptions, AssociateDhcpOptions, DescribeDhcpOptions, DeleteDhcpOptions, CreateEgressOnlyInternetGateway, DescribeEgressOnlyInternetGateways, DeleteEgressOnlyInternetGateway | In-memory state only — no real VMs; default VPC, subnet, security group, internet gateway, and route table always present; rules stored but not enforced (matches LocalStack) |
+| **EBS** | CreateVolume, DeleteVolume, DescribeVolumes, DescribeVolumeStatus, AttachVolume, DetachVolume, ModifyVolume, DescribeVolumesModifications, EnableVolumeIO, ModifyVolumeAttribute, DescribeVolumeAttribute, CreateSnapshot, DeleteSnapshot, DescribeSnapshots, CopySnapshot, ModifySnapshotAttribute, DescribeSnapshotAttribute | Part of EC2 Query/XML service; attach/detach updates volume state; snapshots stored as completed immediately; Pro-only on LocalStack — free here |
+| **EFS** | CreateFileSystem, DescribeFileSystems, DeleteFileSystem, UpdateFileSystem, CreateMountTarget, DescribeMountTargets, DeleteMountTarget, DescribeMountTargetSecurityGroups, ModifyMountTargetSecurityGroups, CreateAccessPoint, DescribeAccessPoints, DeleteAccessPoint, TagResource, UntagResource, ListTagsForResource, PutLifecycleConfiguration, DescribeLifecycleConfiguration, PutBackupPolicy, DescribeBackupPolicy, DescribeAccountPreferences, PutAccountPreferences | REST/JSON `/2015-02-01/*`; CreationToken idempotency; FileSystem deletion blocked when mount targets exist; Pro-only on LocalStack — free here |
+| **EMR** | RunJobFlow, DescribeCluster, ListClusters, TerminateJobFlows, ModifyCluster, SetTerminationProtection, SetVisibleToAllUsers, AddJobFlowSteps, DescribeStep, ListSteps, CancelSteps, AddInstanceFleet, ListInstanceFleets, ModifyInstanceFleet, AddInstanceGroups, ListInstanceGroups, ModifyInstanceGroups, ListBootstrapActions, AddTags, RemoveTags, GetBlockPublicAccessConfiguration, PutBlockPublicAccessConfiguration | Control plane only — no real Spark/Hadoop; clusters start in WAITING (KeepAlive=true) or TERMINATED (KeepAlive=false); steps stored as COMPLETED immediately; all three instance modes (simple, InstanceGroups, InstanceFleets); TerminationProtected enforced; Pro-only on LocalStack — free here |
+>>>>>>> upstream/master
 | **Cognito** | **User Pools**: CreateUserPool, DeleteUserPool, DescribeUserPool, ListUserPools, UpdateUserPool, CreateUserPoolClient, DeleteUserPoolClient, DescribeUserPoolClient, ListUserPoolClients, UpdateUserPoolClient, AdminCreateUser, AdminDeleteUser, AdminGetUser, ListUsers, AdminSetUserPassword, AdminUpdateUserAttributes, AdminConfirmSignUp, AdminDisableUser, AdminEnableUser, AdminResetUserPassword, AdminUserGlobalSignOut, AdminAddUserToGroup, AdminRemoveUserFromGroup, AdminListGroupsForUser, AdminListUserAuthEvents, AdminInitiateAuth, AdminRespondToAuthChallenge, InitiateAuth, RespondToAuthChallenge, GlobalSignOut, RevokeToken, SignUp, ConfirmSignUp, ForgotPassword, ConfirmForgotPassword, ChangePassword, GetUser, UpdateUserAttributes, DeleteUser, CreateGroup, DeleteGroup, GetGroup, ListGroups, ListUsersInGroup, CreateUserPoolDomain, DeleteUserPoolDomain, DescribeUserPoolDomain, GetUserPoolMfaConfig, SetUserPoolMfaConfig, AssociateSoftwareToken, VerifySoftwareToken, TagResource, UntagResource, ListTagsForResource; **Identity Pools**: CreateIdentityPool, DeleteIdentityPool, DescribeIdentityPool, ListIdentityPools, UpdateIdentityPool, GetId, GetCredentialsForIdentity, GetOpenIdToken, SetIdentityPoolRoles, GetIdentityPoolRoles, ListIdentities, DescribeIdentity, MergeDeveloperIdentities, UnlinkDeveloperIdentity, UnlinkIdentity, TagResource, UntagResource, ListTagsForResource; **OAuth2**: /oauth2/token (client_credentials) | Stub JWT tokens (structurally valid base64url JWTs); SRP auth returns PASSWORD_VERIFIER challenge; confirmation codes hardcoded (signup: 123456, forgot-password: 654321); MFA config stored in-memory |
 
 ---
@@ -381,6 +390,22 @@ ecs.stop_task(cluster="dev", task=task_arn)
 | `ELASTICACHE_BASE_PORT` | `16379` | Starting host port for ElastiCache containers |
 | `PERSIST_STATE` | `0` | Set `1` to persist service state across restarts |
 | `STATE_DIR` | `/tmp/ministack-state` | Directory for persisted state files |
+| `ATHENA_ENGINE` | `auto` | SQL engine for Athena: `auto`, `duckdb`, `mock` |
+
+### Athena SQL Engines
+
+Set `ATHENA_ENGINE` to control Athena's SQL execution engine. In `auto` mode, DuckDB is used if installed, otherwise queries return mock results.
+
+| Capability | `duckdb` | `mock` |
+|---|---|---|
+| Simple SELECT / expressions | Yes | Partial (regex) |
+| Arithmetic, aggregations, JOINs, CTEs | Yes | No |
+| Window functions, subqueries | Yes | No |
+| Parquet / CSV / JSON file queries | Yes | No |
+| UNNEST, ARRAY, MAP functions | Yes | No |
+| APPROX\_DISTINCT, REGEXP\_EXTRACT | Yes | No |
+
+Install DuckDB for full Athena SQL compatibility: `pip install ministack[full]`.
 
 ### State Persistence
 
@@ -427,7 +452,8 @@ MiniStack keeps Python Lambda functions warm between invocations. After the firs
                     │  │  Step Functions  API GW v1/v2    │    │
                     │  │  ECS   RDS   ElastiCache  Glue   │    │
                     │  │  Athena  Firehose  Route53        │    │
-                    │  │  Cognito  EC2                    │    │
+                    │  │  Cognito  EC2  EMR  EBS  EFS     │    │
+                    │  │  ALB/ELBv2                       │    │
                     │  └──────────────────────────────────┘    │
                     │                                          │
                     │  In-Memory Storage + Optional Docker     │
@@ -450,19 +476,20 @@ pip install boto3 pytest duckdb docker cbor2
 # Start MiniStack
 docker compose up -d
 
-# Run the full test suite (644 tests across all 26 services)
+# Run the full test suite (708 tests across all 30 services)
 pytest tests/ -v
 ```
 
 Expected output:
+
 ```
-collected 644 items
+collected 694 items
 
 tests/test_services.py::test_s3_create_bucket PASSED
 ...
 tests/test_services.py::test_app_asgi_callable PASSED
 
-644 passed in ~60s
+694 passed in ~60s
 ```
 
 ---
@@ -507,6 +534,9 @@ provider "aws" {
     cognitoidp     = "http://localhost:4566"
     cognitoidentity = "http://localhost:4566"
     ec2             = "http://localhost:4566"
+    emr             = "http://localhost:4566"
+    efs             = "http://localhost:4566"
+    elbv2           = "http://localhost:4566"
   }
 }
 ```
@@ -557,7 +587,15 @@ config:
 | **Route53** | ✅ | ✅ | ✅ |
 | **Cognito** | ✅ | ✅ | ✅ |
 | **EC2** | ✅ | ✅ | ✅ |
+<<<<<<< HEAD
 | **CloudFormation** | ✅ | partial | ✅ |
+=======
+| **EMR** | ✅ | Paid | ✅ |
+| **ELBv2 / ALB** | ✅ | ✅ | ✅ |
+| **EBS** | ✅ | Paid | ✅ |
+| **EFS** | ✅ | Paid | ✅ |
+| CloudFormation | ❌ | partial | ✅ |
+>>>>>>> upstream/master
 | Cost | **Free** | Was free, now paid | $35+/mo |
 | Docker image size | ~150MB | ~1GB | ~1GB |
 | Memory at idle | ~30MB | ~500MB | ~500MB |

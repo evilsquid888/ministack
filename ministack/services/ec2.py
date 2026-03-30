@@ -24,6 +24,22 @@ Supports:
   ENI:             CreateNetworkInterface, DeleteNetworkInterface, DescribeNetworkInterfaces,
                    AttachNetworkInterface, DetachNetworkInterface
   VPC Endpoints:   CreateVpcEndpoint, DeleteVpcEndpoints, DescribeVpcEndpoints
+  EBS Volumes:     CreateVolume, DeleteVolume, DescribeVolumes, DescribeVolumeStatus,
+                   AttachVolume, DetachVolume, ModifyVolume, DescribeVolumesModifications,
+                   EnableVolumeIO, ModifyVolumeAttribute, DescribeVolumeAttribute
+  EBS Snapshots:   CreateSnapshot, DeleteSnapshot, DescribeSnapshots,
+                   ModifySnapshotAttribute, DescribeSnapshotAttribute, CopySnapshot
+  NAT Gateways:    CreateNatGateway, DescribeNatGateways, DeleteNatGateway
+  Network ACLs:    CreateNetworkAcl, DescribeNetworkAcls, DeleteNetworkAcl,
+                   CreateNetworkAclEntry, DeleteNetworkAclEntry, ReplaceNetworkAclEntry,
+                   ReplaceNetworkAclAssociation
+  Flow Logs:       CreateFlowLogs, DescribeFlowLogs, DeleteFlowLogs
+  VPC Peering:     CreateVpcPeeringConnection, AcceptVpcPeeringConnection,
+                   DescribeVpcPeeringConnections, DeleteVpcPeeringConnection
+  DHCP Options:    CreateDhcpOptions, AssociateDhcpOptions, DescribeDhcpOptions,
+                   DeleteDhcpOptions
+  Egress IGW:      CreateEgressOnlyInternetGateway, DescribeEgressOnlyInternetGateways,
+                   DeleteEgressOnlyInternetGateway
 """
 
 import os
@@ -55,6 +71,14 @@ _tags: dict = {}            # resource_id -> [{"Key": ..., "Value": ...}]
 _route_tables: dict = {}    # rtb_id -> route table record
 _network_interfaces: dict = {}  # eni_id -> ENI record
 _vpc_endpoints: dict = {}   # vpce_id -> endpoint record
+_volumes: dict = {}         # vol_id -> volume record
+_snapshots: dict = {}       # snap_id -> snapshot record
+_nat_gateways: dict = {}    # nat_id -> NAT gateway record
+_network_acls: dict = {}    # acl_id -> network ACL record
+_flow_logs: dict = {}       # flow_log_id -> flow log record
+_vpc_peering: dict = {}     # pcx_id -> peering connection record
+_dhcp_options: dict = {}    # dopt_id -> DHCP options record
+_egress_igws: dict = {}     # eigw_id -> egress-only internet gateway record
 
 # Default VPC / subnet created at import time so DescribeVpcs always returns something
 _DEFAULT_VPC_ID = "vpc-00000001"
@@ -1010,6 +1034,302 @@ def _describe_tags(p):
 
 
 # ---------------------------------------------------------------------------
+# EBS Volumes
+# ---------------------------------------------------------------------------
+
+def _new_volume_id():
+    return "vol-" + "".join(random.choices(string.hexdigits[:16], k=17))
+
+def _new_snapshot_id():
+    return "snap-" + "".join(random.choices(string.hexdigits[:16], k=17))
+
+
+def _create_volume(p):
+    vol_id = _new_volume_id()
+    az = _p(p, "AvailabilityZone") or f"{REGION}a"
+    size = int(_p(p, "Size") or "8")
+    vol_type = _p(p, "VolumeType") or "gp2"
+    snapshot_id = _p(p, "SnapshotId") or ""
+    iops = _p(p, "Iops") or ""
+    encrypted = _p(p, "Encrypted") or "false"
+    now = _now_ts()
+    _volumes[vol_id] = {
+        "VolumeId": vol_id,
+        "Size": size,
+        "AvailabilityZone": az,
+        "State": "available",
+        "VolumeType": vol_type,
+        "SnapshotId": snapshot_id,
+        "Iops": int(iops) if iops else (3000 if vol_type in ("gp3", "io1", "io2") else 0),
+        "Encrypted": encrypted.lower() == "true",
+        "CreateTime": now,
+        "Attachments": [],
+        "MultiAttachEnabled": False,
+        "Throughput": 125 if vol_type == "gp3" else 0,
+    }
+    return _xml(200, "CreateVolumeResponse", _volume_inner_xml(_volumes[vol_id]))
+
+
+def _delete_volume(p):
+    vol_id = _p(p, "VolumeId")
+    if vol_id not in _volumes:
+        return _error("InvalidVolume.NotFound", f"The volume '{vol_id}' does not exist.", 400)
+    vol = _volumes[vol_id]
+    if vol["Attachments"]:
+        return _error("VolumeInUse", f"Volume {vol_id} is currently attached.", 400)
+    del _volumes[vol_id]
+    return _xml(200, "DeleteVolumeResponse", "<return>true</return>")
+
+
+def _describe_volumes(p):
+    filter_ids = _parse_member_list(p, "VolumeId")
+    items = ""
+    for vol in _volumes.values():
+        if filter_ids and vol["VolumeId"] not in filter_ids:
+            continue
+        items += f"<item>{_volume_inner_xml(vol)}</item>"
+    return _xml(200, "DescribeVolumesResponse", f"<volumeSet>{items}</volumeSet>")
+
+
+def _describe_volume_status(p):
+    filter_ids = _parse_member_list(p, "VolumeId")
+    items = ""
+    for vol in _volumes.values():
+        if filter_ids and vol["VolumeId"] not in filter_ids:
+            continue
+        items += f"""<item>
+            <volumeId>{vol['VolumeId']}</volumeId>
+            <availabilityZone>{vol['AvailabilityZone']}</availabilityZone>
+            <volumeStatus>
+                <status>ok</status>
+                <details><item><name>io-enabled</name><status>passed</status></item></details>
+            </volumeStatus>
+            <actionsSet/>
+            <eventsSet/>
+        </item>"""
+    return _xml(200, "DescribeVolumeStatusResponse", f"<volumeStatusSet>{items}</volumeStatusSet>")
+
+
+def _attach_volume(p):
+    vol_id = _p(p, "VolumeId")
+    instance_id = _p(p, "InstanceId")
+    device = _p(p, "Device") or "/dev/xvdf"
+    vol = _volumes.get(vol_id)
+    if not vol:
+        return _error("InvalidVolume.NotFound", f"The volume '{vol_id}' does not exist.", 400)
+    if not _instances.get(instance_id):
+        return _error("InvalidInstanceID.NotFound", f"The instance ID '{instance_id}' does not exist.", 400)
+    now = _now_ts()
+    attachment = {
+        "VolumeId": vol_id,
+        "InstanceId": instance_id,
+        "Device": device,
+        "State": "attached",
+        "AttachTime": now,
+        "DeleteOnTermination": False,
+    }
+    vol["Attachments"] = [attachment]
+    vol["State"] = "in-use"
+    return _xml(200, "AttachVolumeResponse", f"""
+        <volumeId>{vol_id}</volumeId>
+        <instanceId>{instance_id}</instanceId>
+        <device>{device}</device>
+        <status>attached</status>
+        <attachTime>{now}</attachTime>
+        <deleteOnTermination>false</deleteOnTermination>""")
+
+
+def _detach_volume(p):
+    vol_id = _p(p, "VolumeId")
+    vol = _volumes.get(vol_id)
+    if not vol:
+        return _error("InvalidVolume.NotFound", f"The volume '{vol_id}' does not exist.", 400)
+    vol["Attachments"] = []
+    vol["State"] = "available"
+    return _xml(200, "DetachVolumeResponse", f"""
+        <volumeId>{vol_id}</volumeId>
+        <status>detached</status>""")
+
+
+def _modify_volume(p):
+    vol_id = _p(p, "VolumeId")
+    vol = _volumes.get(vol_id)
+    if not vol:
+        return _error("InvalidVolume.NotFound", f"The volume '{vol_id}' does not exist.", 400)
+    if _p(p, "Size"):
+        vol["Size"] = int(_p(p, "Size"))
+    if _p(p, "VolumeType"):
+        vol["VolumeType"] = _p(p, "VolumeType")
+    if _p(p, "Iops"):
+        vol["Iops"] = int(_p(p, "Iops"))
+    now = _now_ts()
+    return _xml(200, "ModifyVolumeResponse", f"""
+        <volumeModification>
+            <volumeId>{vol_id}</volumeId>
+            <modificationState>completed</modificationState>
+            <targetSize>{vol['Size']}</targetSize>
+            <targetVolumeType>{vol['VolumeType']}</targetVolumeType>
+            <targetIops>{vol['Iops']}</targetIops>
+            <startTime>{now}</startTime>
+            <endTime>{now}</endTime>
+            <progress>100</progress>
+        </volumeModification>""")
+
+
+def _describe_volumes_modifications(p):
+    filter_ids = _parse_member_list(p, "VolumeId")
+    items = ""
+    for vol in _volumes.values():
+        if filter_ids and vol["VolumeId"] not in filter_ids:
+            continue
+        now = _now_ts()
+        items += f"""<item>
+            <volumeId>{vol['VolumeId']}</volumeId>
+            <modificationState>completed</modificationState>
+            <targetSize>{vol['Size']}</targetSize>
+            <targetVolumeType>{vol['VolumeType']}</targetVolumeType>
+            <targetIops>{vol['Iops']}</targetIops>
+            <startTime>{now}</startTime>
+            <endTime>{now}</endTime>
+            <progress>100</progress>
+        </item>"""
+    return _xml(200, "DescribeVolumesModificationsResponse", f"<volumeModificationSet>{items}</volumeModificationSet>")
+
+
+def _enable_volume_io(p):
+    return _xml(200, "EnableVolumeIOResponse", "<return>true</return>")
+
+
+def _modify_volume_attribute(p):
+    return _xml(200, "ModifyVolumeAttributeResponse", "<return>true</return>")
+
+
+def _describe_volume_attribute(p):
+    vol_id = _p(p, "VolumeId")
+    attribute = _p(p, "Attribute") or "autoEnableIO"
+    return _xml(200, "DescribeVolumeAttributeResponse", f"""
+        <volumeId>{vol_id}</volumeId>
+        <autoEnableIO><value>false</value></autoEnableIO>""")
+
+
+def _volume_inner_xml(vol):
+    attachments = "".join(f"""<item>
+        <volumeId>{a['VolumeId']}</volumeId>
+        <instanceId>{a['InstanceId']}</instanceId>
+        <device>{a['Device']}</device>
+        <status>{a['State']}</status>
+        <attachTime>{a['AttachTime']}</attachTime>
+        <deleteOnTermination>{'true' if a['DeleteOnTermination'] else 'false'}</deleteOnTermination>
+    </item>""" for a in vol.get("Attachments", []))
+    snap = f"<snapshotId>{vol['SnapshotId']}</snapshotId>" if vol.get("SnapshotId") else "<snapshotId/>"
+    iops = f"<iops>{vol['Iops']}</iops>" if vol.get("Iops") else ""
+    return f"""
+        <volumeId>{vol['VolumeId']}</volumeId>
+        <size>{vol['Size']}</size>
+        <availabilityZone>{vol['AvailabilityZone']}</availabilityZone>
+        <status>{vol['State']}</status>
+        <createTime>{vol['CreateTime']}</createTime>
+        <volumeType>{vol['VolumeType']}</volumeType>
+        {snap}
+        {iops}
+        <encrypted>{'true' if vol['Encrypted'] else 'false'}</encrypted>
+        <multiAttachEnabled>{'true' if vol['MultiAttachEnabled'] else 'false'}</multiAttachEnabled>
+        <attachmentSet>{attachments}</attachmentSet>
+        <tagSet/>"""
+
+
+# ---------------------------------------------------------------------------
+# EBS Snapshots
+# ---------------------------------------------------------------------------
+
+def _create_snapshot(p):
+    vol_id = _p(p, "VolumeId")
+    description = _p(p, "Description") or ""
+    vol = _volumes.get(vol_id)
+    if not vol:
+        return _error("InvalidVolume.NotFound", f"The volume '{vol_id}' does not exist.", 400)
+    snap_id = _new_snapshot_id()
+    now = _now_ts()
+    _snapshots[snap_id] = {
+        "SnapshotId": snap_id,
+        "VolumeId": vol_id,
+        "VolumeSize": vol["Size"],
+        "Description": description,
+        "State": "completed",
+        "StartTime": now,
+        "Progress": "100%",
+        "OwnerId": ACCOUNT_ID,
+        "Encrypted": vol["Encrypted"],
+        "StorageTier": "standard",
+    }
+    return _xml(200, "CreateSnapshotResponse", _snapshot_inner_xml(_snapshots[snap_id]))
+
+
+def _delete_snapshot(p):
+    snap_id = _p(p, "SnapshotId")
+    if snap_id not in _snapshots:
+        return _error("InvalidSnapshot.NotFound", f"The snapshot '{snap_id}' does not exist.", 400)
+    del _snapshots[snap_id]
+    return _xml(200, "DeleteSnapshotResponse", "<return>true</return>")
+
+
+def _describe_snapshots(p):
+    filter_ids = _parse_member_list(p, "SnapshotId")
+    owner_ids = _parse_member_list(p, "Owner")
+    items = ""
+    for snap in _snapshots.values():
+        if filter_ids and snap["SnapshotId"] not in filter_ids:
+            continue
+        if owner_ids and snap["OwnerId"] not in owner_ids and "self" not in owner_ids:
+            continue
+        items += f"<item>{_snapshot_inner_xml(snap)}</item>"
+    return _xml(200, "DescribeSnapshotsResponse", f"<snapshotSet>{items}</snapshotSet>")
+
+
+def _copy_snapshot(p):
+    source_snap_id = _p(p, "SourceSnapshotId")
+    description = _p(p, "Description") or ""
+    source = _snapshots.get(source_snap_id)
+    if not source:
+        return _error("InvalidSnapshot.NotFound", f"The snapshot '{source_snap_id}' does not exist.", 400)
+    new_snap_id = _new_snapshot_id()
+    now = _now_ts()
+    _snapshots[new_snap_id] = {
+        **source,
+        "SnapshotId": new_snap_id,
+        "Description": description or source["Description"],
+        "StartTime": now,
+    }
+    return _xml(200, "CopySnapshotResponse", f"<snapshotId>{new_snap_id}</snapshotId>")
+
+
+def _modify_snapshot_attribute(p):
+    return _xml(200, "ModifySnapshotAttributeResponse", "<return>true</return>")
+
+
+def _describe_snapshot_attribute(p):
+    snap_id = _p(p, "SnapshotId")
+    return _xml(200, "DescribeSnapshotAttributeResponse", f"""
+        <snapshotId>{snap_id}</snapshotId>
+        <createVolumePermission/>""")
+
+
+def _snapshot_inner_xml(snap):
+    return f"""
+        <snapshotId>{snap['SnapshotId']}</snapshotId>
+        <volumeId>{snap['VolumeId']}</volumeId>
+        <status>{snap['State']}</status>
+        <startTime>{snap['StartTime']}</startTime>
+        <progress>{snap['Progress']}</progress>
+        <ownerId>{snap['OwnerId']}</ownerId>
+        <volumeSize>{snap['VolumeSize']}</volumeSize>
+        <description>{snap['Description']}</description>
+        <encrypted>{'true' if snap['Encrypted'] else 'false'}</encrypted>
+        <storageTier>{snap['StorageTier']}</storageTier>
+        <tagSet/>"""
+
+
+# ---------------------------------------------------------------------------
 # XML helpers
 # ---------------------------------------------------------------------------
 
@@ -1364,6 +1684,10 @@ def _guess_resource_type(resource_id):
         return "network-interface"
     if resource_id.startswith("vpce-"):
         return "vpc-endpoint"
+    if resource_id.startswith("vol-"):
+        return "volume"
+    if resource_id.startswith("snap-"):
+        return "snapshot"
     return "resource"
 
 
@@ -1395,6 +1719,505 @@ def _error(code, message, status):
 
 
 # ---------------------------------------------------------------------------
+# NAT Gateways
+# ---------------------------------------------------------------------------
+
+def _create_nat_gateway(params):
+    subnet_id = _p(params, "SubnetId")
+    alloc_id = _p(params, "AllocationId")
+    connectivity = _p(params, "ConnectivityType") or "public"
+    if not subnet_id:
+        return _error("MissingParameter", "SubnetId is required", 400)
+    nat_id = "nat-" + "".join(random.choices(string.hexdigits[:16], k=17))
+    subnet = _subnets.get(subnet_id)
+    vpc_id = subnet["VpcId"] if subnet else _DEFAULT_VPC_ID
+    tags = _parse_tags(params)
+    record = {
+        "NatGatewayId": nat_id,
+        "SubnetId": subnet_id,
+        "VpcId": vpc_id,
+        "AllocationId": alloc_id,
+        "ConnectivityType": connectivity,
+        "State": "available",
+        "CreateTime": _now_ts(),
+        "Tags": tags,
+    }
+    _nat_gateways[nat_id] = record
+    if tags:
+        _tags[nat_id] = tags
+    inner = f"""<natGateway>
+        <natGatewayId>{nat_id}</natGatewayId>
+        <subnetId>{subnet_id}</subnetId>
+        <vpcId>{vpc_id}</vpcId>
+        <state>available</state>
+        <connectivityType>{connectivity}</connectivityType>
+        <createTime>{_now_ts()}</createTime>
+        <natGatewayAddressSet/>
+        <tagSet/>
+    </natGateway>"""
+    return _xml(200, "CreateNatGatewayResponse", inner)
+
+
+def _describe_nat_gateways(params):
+    filters = _parse_filters(params)
+    ids = _parse_member_list(params, "NatGatewayId")
+    items = ""
+    for nat in _nat_gateways.values():
+        if ids and nat["NatGatewayId"] not in ids:
+            continue
+        if filters.get("state") and nat["State"] not in filters["state"]:
+            continue
+        if filters.get("vpc-id") and nat["VpcId"] not in filters["vpc-id"]:
+            continue
+        if filters.get("subnet-id") and nat["SubnetId"] not in filters["subnet-id"]:
+            continue
+        items += f"""<item>
+            <natGatewayId>{nat['NatGatewayId']}</natGatewayId>
+            <subnetId>{nat['SubnetId']}</subnetId>
+            <vpcId>{nat['VpcId']}</vpcId>
+            <state>{nat['State']}</state>
+            <connectivityType>{nat['ConnectivityType']}</connectivityType>
+            <createTime>{nat['CreateTime']}</createTime>
+            <natGatewayAddressSet/>
+            <tagSet/>
+        </item>"""
+    return _xml(200, "DescribeNatGatewaysResponse",
+                f"<natGatewaySet>{items}</natGatewaySet>")
+
+
+def _delete_nat_gateway(params):
+    nat_id = _p(params, "NatGatewayId")
+    if nat_id not in _nat_gateways:
+        return _error("NatGatewayNotFound", f"NatGateway {nat_id} not found", 400)
+    _nat_gateways[nat_id]["State"] = "deleted"
+    return _xml(200, "DeleteNatGatewayResponse",
+                f"<natGatewayId>{nat_id}</natGatewayId>")
+
+
+# ---------------------------------------------------------------------------
+# Network ACLs
+# ---------------------------------------------------------------------------
+
+def _create_network_acl(params):
+    vpc_id = _p(params, "VpcId")
+    if not vpc_id:
+        return _error("MissingParameter", "VpcId is required", 400)
+    acl_id = "acl-" + "".join(random.choices(string.hexdigits[:16], k=17))
+    tags = _parse_tags(params)
+    record = {
+        "NetworkAclId": acl_id,
+        "VpcId": vpc_id,
+        "IsDefault": False,
+        "Entries": [],
+        "Associations": [],
+        "Tags": tags,
+        "OwnerId": ACCOUNT_ID,
+    }
+    _network_acls[acl_id] = record
+    if tags:
+        _tags[acl_id] = tags
+    inner = f"""<networkAcl>
+        <networkAclId>{acl_id}</networkAclId>
+        <vpcId>{vpc_id}</vpcId>
+        <default>false</default>
+        <entrySet/>
+        <associationSet/>
+        <tagSet/>
+        <ownerId>{ACCOUNT_ID}</ownerId>
+    </networkAcl>"""
+    return _xml(200, "CreateNetworkAclResponse", inner)
+
+
+def _describe_network_acls(params):
+    filters = _parse_filters(params)
+    ids = _parse_member_list(params, "NetworkAclId")
+    items = ""
+    for acl in _network_acls.values():
+        if ids and acl["NetworkAclId"] not in ids:
+            continue
+        if filters.get("vpc-id") and acl["VpcId"] not in filters["vpc-id"]:
+            continue
+        entries = "".join(f"""<item>
+            <ruleNumber>{e['RuleNumber']}</ruleNumber>
+            <protocol>{e['Protocol']}</protocol>
+            <ruleAction>{e['RuleAction']}</ruleAction>
+            <egress>{'true' if e['Egress'] else 'false'}</egress>
+            <cidrBlock>{e.get('CidrBlock','0.0.0.0/0')}</cidrBlock>
+        </item>""" for e in acl["Entries"])
+        assocs = "".join(f"""<item>
+            <networkAclAssociationId>{a['NetworkAclAssociationId']}</networkAclAssociationId>
+            <networkAclId>{acl['NetworkAclId']}</networkAclId>
+            <subnetId>{a['SubnetId']}</subnetId>
+        </item>""" for a in acl["Associations"])
+        items += f"""<item>
+            <networkAclId>{acl['NetworkAclId']}</networkAclId>
+            <vpcId>{acl['VpcId']}</vpcId>
+            <default>{'true' if acl['IsDefault'] else 'false'}</default>
+            <entrySet>{entries}</entrySet>
+            <associationSet>{assocs}</associationSet>
+            <tagSet/>
+            <ownerId>{acl['OwnerId']}</ownerId>
+        </item>"""
+    return _xml(200, "DescribeNetworkAclsResponse",
+                f"<networkAclSet>{items}</networkAclSet>")
+
+
+def _delete_network_acl(params):
+    acl_id = _p(params, "NetworkAclId")
+    if acl_id not in _network_acls:
+        return _error("InvalidNetworkAclID.NotFound", f"The network ACL '{acl_id}' does not exist", 400)
+    del _network_acls[acl_id]
+    return _xml(200, "DeleteNetworkAclResponse", "<return>true</return>")
+
+
+def _create_network_acl_entry(params):
+    acl_id = _p(params, "NetworkAclId")
+    if acl_id not in _network_acls:
+        return _error("InvalidNetworkAclID.NotFound", f"The network ACL '{acl_id}' does not exist", 400)
+    entry = {
+        "RuleNumber": int(_p(params, "RuleNumber") or 100),
+        "Protocol": _p(params, "Protocol") or "-1",
+        "RuleAction": _p(params, "RuleAction") or "allow",
+        "Egress": _p(params, "Egress") == "true",
+        "CidrBlock": _p(params, "CidrBlock") or "0.0.0.0/0",
+    }
+    _network_acls[acl_id]["Entries"].append(entry)
+    return _xml(200, "CreateNetworkAclEntryResponse", "<return>true</return>")
+
+
+def _delete_network_acl_entry(params):
+    acl_id = _p(params, "NetworkAclId")
+    rule_num = int(_p(params, "RuleNumber") or 0)
+    egress = _p(params, "Egress") == "true"
+    if acl_id not in _network_acls:
+        return _error("InvalidNetworkAclID.NotFound", f"The network ACL '{acl_id}' does not exist", 400)
+    acl = _network_acls[acl_id]
+    acl["Entries"] = [e for e in acl["Entries"]
+                      if not (e["RuleNumber"] == rule_num and e["Egress"] == egress)]
+    return _xml(200, "DeleteNetworkAclEntryResponse", "<return>true</return>")
+
+
+def _replace_network_acl_entry(params):
+    acl_id = _p(params, "NetworkAclId")
+    rule_num = int(_p(params, "RuleNumber") or 0)
+    egress = _p(params, "Egress") == "true"
+    if acl_id not in _network_acls:
+        return _error("InvalidNetworkAclID.NotFound", f"The network ACL '{acl_id}' does not exist", 400)
+    acl = _network_acls[acl_id]
+    acl["Entries"] = [e for e in acl["Entries"]
+                      if not (e["RuleNumber"] == rule_num and e["Egress"] == egress)]
+    acl["Entries"].append({
+        "RuleNumber": rule_num,
+        "Protocol": _p(params, "Protocol") or "-1",
+        "RuleAction": _p(params, "RuleAction") or "allow",
+        "Egress": egress,
+        "CidrBlock": _p(params, "CidrBlock") or "0.0.0.0/0",
+    })
+    return _xml(200, "ReplaceNetworkAclEntryResponse", "<return>true</return>")
+
+
+def _replace_network_acl_association(params):
+    assoc_id = _p(params, "AssociationId")
+    new_acl_id = _p(params, "NetworkAclId")
+    if new_acl_id not in _network_acls:
+        return _error("InvalidNetworkAclID.NotFound", f"The network ACL '{new_acl_id}' does not exist", 400)
+    new_assoc_id = "aclassoc-" + "".join(random.choices(string.hexdigits[:16], k=17))
+    # Remove old association from whichever ACL owns it
+    for acl in _network_acls.values():
+        acl["Associations"] = [a for a in acl["Associations"]
+                                if a["NetworkAclAssociationId"] != assoc_id]
+    subnet_id = ""
+    _network_acls[new_acl_id]["Associations"].append({
+        "NetworkAclAssociationId": new_assoc_id,
+        "SubnetId": subnet_id,
+    })
+    return _xml(200, "ReplaceNetworkAclAssociationResponse",
+                f"<newAssociationId>{new_assoc_id}</newAssociationId>")
+
+
+# ---------------------------------------------------------------------------
+# Flow Logs
+# ---------------------------------------------------------------------------
+
+def _create_flow_logs(params):
+    resource_ids = _parse_member_list(params, "ResourceId")
+    resource_type = _p(params, "ResourceType") or "VPC"
+    traffic_type = _p(params, "TrafficType") or "ALL"
+    log_dest_type = _p(params, "LogDestinationType") or "cloud-watch-logs"
+    log_dest = _p(params, "LogDestination") or _p(params, "LogGroupName")
+    created = []
+    for rid in resource_ids:
+        fl_id = "fl-" + "".join(random.choices(string.hexdigits[:16], k=17))
+        _flow_logs[fl_id] = {
+            "FlowLogId": fl_id,
+            "ResourceId": rid,
+            "ResourceType": resource_type,
+            "TrafficType": traffic_type,
+            "LogDestinationType": log_dest_type,
+            "LogDestination": log_dest,
+            "FlowLogStatus": "ACTIVE",
+            "CreationTime": _now_ts(),
+        }
+        created.append(fl_id)
+    ids_xml = "".join(f"<item>{fid}</item>" for fid in created)
+    return _xml(200, "CreateFlowLogsResponse",
+                f"<flowLogIdSet>{ids_xml}</flowLogIdSet><unsuccessful/>")
+
+
+def _describe_flow_logs(params):
+    ids = _parse_member_list(params, "FlowLogId")
+    filters = _parse_filters(params)
+    items = ""
+    for fl in _flow_logs.values():
+        if ids and fl["FlowLogId"] not in ids:
+            continue
+        if filters.get("resource-id") and fl["ResourceId"] not in filters["resource-id"]:
+            continue
+        items += f"""<item>
+            <flowLogId>{fl['FlowLogId']}</flowLogId>
+            <resourceId>{fl['ResourceId']}</resourceId>
+            <trafficType>{fl['TrafficType']}</trafficType>
+            <logDestinationType>{fl['LogDestinationType']}</logDestinationType>
+            <logDestination>{fl.get('LogDestination','')}</logDestination>
+            <flowLogStatus>{fl['FlowLogStatus']}</flowLogStatus>
+            <creationTime>{fl['CreationTime']}</creationTime>
+        </item>"""
+    return _xml(200, "DescribeFlowLogsResponse", f"<flowLogSet>{items}</flowLogSet>")
+
+
+def _delete_flow_logs(params):
+    ids = _parse_member_list(params, "FlowLogId")
+    for fid in ids:
+        _flow_logs.pop(fid, None)
+    return _xml(200, "DeleteFlowLogsResponse", "<unsuccessful/>")
+
+
+# ---------------------------------------------------------------------------
+# VPC Peering Connections
+# ---------------------------------------------------------------------------
+
+def _create_vpc_peering_connection(params):
+    vpc_id = _p(params, "VpcId")
+    peer_vpc_id = _p(params, "PeerVpcId")
+    peer_owner_id = _p(params, "PeerOwnerId") or ACCOUNT_ID
+    peer_region = _p(params, "PeerRegion") or REGION
+    if not vpc_id or not peer_vpc_id:
+        return _error("MissingParameter", "VpcId and PeerVpcId are required", 400)
+    pcx_id = "pcx-" + "".join(random.choices(string.hexdigits[:16], k=17))
+    record = {
+        "VpcPeeringConnectionId": pcx_id,
+        "RequesterVpcInfo": {"VpcId": vpc_id, "OwnerId": ACCOUNT_ID, "Region": REGION},
+        "AccepterVpcInfo": {"VpcId": peer_vpc_id, "OwnerId": peer_owner_id, "Region": peer_region},
+        "Status": {"Code": "pending-acceptance", "Message": "Pending Acceptance by " + peer_owner_id},
+        "ExpirationTime": _now_ts(),
+        "Tags": [],
+    }
+    _vpc_peering[pcx_id] = record
+    inner = f"""<vpcPeeringConnection>
+        <vpcPeeringConnectionId>{pcx_id}</vpcPeeringConnectionId>
+        <requesterVpcInfo><vpcId>{vpc_id}</vpcId><ownerId>{ACCOUNT_ID}</ownerId></requesterVpcInfo>
+        <accepterVpcInfo><vpcId>{peer_vpc_id}</vpcId><ownerId>{peer_owner_id}</ownerId></accepterVpcInfo>
+        <status><code>pending-acceptance</code></status>
+        <tagSet/>
+    </vpcPeeringConnection>"""
+    return _xml(200, "CreateVpcPeeringConnectionResponse", inner)
+
+
+def _accept_vpc_peering_connection(params):
+    pcx_id = _p(params, "VpcPeeringConnectionId")
+    if pcx_id not in _vpc_peering:
+        return _error("InvalidVpcPeeringConnectionID.NotFound",
+                      f"The VPC peering connection '{pcx_id}' does not exist", 400)
+    _vpc_peering[pcx_id]["Status"] = {"Code": "active", "Message": "Active"}
+    pcx = _vpc_peering[pcx_id]
+    inner = f"""<vpcPeeringConnection>
+        <vpcPeeringConnectionId>{pcx_id}</vpcPeeringConnectionId>
+        <requesterVpcInfo><vpcId>{pcx['RequesterVpcInfo']['VpcId']}</vpcId></requesterVpcInfo>
+        <accepterVpcInfo><vpcId>{pcx['AccepterVpcInfo']['VpcId']}</vpcId></accepterVpcInfo>
+        <status><code>active</code></status>
+        <tagSet/>
+    </vpcPeeringConnection>"""
+    return _xml(200, "AcceptVpcPeeringConnectionResponse", inner)
+
+
+def _describe_vpc_peering_connections(params):
+    ids = _parse_member_list(params, "VpcPeeringConnectionId")
+    filters = _parse_filters(params)
+    items = ""
+    for pcx in _vpc_peering.values():
+        if ids and pcx["VpcPeeringConnectionId"] not in ids:
+            continue
+        if filters.get("status-code") and pcx["Status"]["Code"] not in filters["status-code"]:
+            continue
+        items += f"""<item>
+            <vpcPeeringConnectionId>{pcx['VpcPeeringConnectionId']}</vpcPeeringConnectionId>
+            <requesterVpcInfo><vpcId>{pcx['RequesterVpcInfo']['VpcId']}</vpcId><ownerId>{pcx['RequesterVpcInfo']['OwnerId']}</ownerId></requesterVpcInfo>
+            <accepterVpcInfo><vpcId>{pcx['AccepterVpcInfo']['VpcId']}</vpcId><ownerId>{pcx['AccepterVpcInfo']['OwnerId']}</ownerId></accepterVpcInfo>
+            <status><code>{pcx['Status']['Code']}</code><message>{pcx['Status']['Message']}</message></status>
+            <tagSet/>
+        </item>"""
+    return _xml(200, "DescribeVpcPeeringConnectionsResponse",
+                f"<vpcPeeringConnectionSet>{items}</vpcPeeringConnectionSet>")
+
+
+def _delete_vpc_peering_connection(params):
+    pcx_id = _p(params, "VpcPeeringConnectionId")
+    if pcx_id not in _vpc_peering:
+        return _error("InvalidVpcPeeringConnectionID.NotFound",
+                      f"The VPC peering connection '{pcx_id}' does not exist", 400)
+    _vpc_peering[pcx_id]["Status"] = {"Code": "deleted", "Message": "Deleted"}
+    return _xml(200, "DeleteVpcPeeringConnectionResponse", "<return>true</return>")
+
+
+# ---------------------------------------------------------------------------
+# DHCP Options
+# ---------------------------------------------------------------------------
+
+def _create_dhcp_options(params):
+    # Parse DhcpConfigurations: DhcpConfiguration.N.Key, DhcpConfiguration.N.Value.N
+    configs = []
+    i = 1
+    while True:
+        key = _p(params, f"DhcpConfiguration.{i}.Key")
+        if not key:
+            break
+        vals = []
+        j = 1
+        while True:
+            v = _p(params, f"DhcpConfiguration.{i}.Value.{j}")
+            if not v:
+                break
+            vals.append(v)
+            j += 1
+        configs.append({"Key": key, "Values": vals})
+        i += 1
+    dopt_id = "dopt-" + "".join(random.choices(string.hexdigits[:16], k=17))
+    tags = _parse_tags(params)
+    record = {
+        "DhcpOptionsId": dopt_id,
+        "DhcpConfigurations": configs,
+        "OwnerId": ACCOUNT_ID,
+        "Tags": tags,
+    }
+    _dhcp_options[dopt_id] = record
+    if tags:
+        _tags[dopt_id] = tags
+    configs_xml = "".join(f"""<item>
+        <key>{c['Key']}</key>
+        <valueSet>{"".join(f'<item><value>{v}</value></item>' for v in c['Values'])}</valueSet>
+    </item>""" for c in configs)
+    inner = f"""<dhcpOptions>
+        <dhcpOptionsId>{dopt_id}</dhcpOptionsId>
+        <dhcpConfigurationSet>{configs_xml}</dhcpConfigurationSet>
+        <ownerId>{ACCOUNT_ID}</ownerId>
+        <tagSet/>
+    </dhcpOptions>"""
+    return _xml(200, "CreateDhcpOptionsResponse", inner)
+
+
+def _associate_dhcp_options(params):
+    dopt_id = _p(params, "DhcpOptionsId")
+    vpc_id = _p(params, "VpcId")
+    if vpc_id not in _vpcs:
+        return _error("InvalidVpcID.NotFound", f"The VPC '{vpc_id}' does not exist", 400)
+    # "default" is valid — resets to AWS-provided DHCP options
+    if dopt_id != "default" and dopt_id not in _dhcp_options:
+        return _error("InvalidDhcpOptionsID.NotFound",
+                      f"The dhcp options '{dopt_id}' does not exist", 400)
+    _vpcs[vpc_id]["DhcpOptionsId"] = dopt_id
+    return _xml(200, "AssociateDhcpOptionsResponse", "<return>true</return>")
+
+
+def _describe_dhcp_options(params):
+    ids = _parse_member_list(params, "DhcpOptionsId")
+    items = ""
+    for dopt in _dhcp_options.values():
+        if ids and dopt["DhcpOptionsId"] not in ids:
+            continue
+        configs_xml = "".join(f"""<item>
+            <key>{c['Key']}</key>
+            <valueSet>{"".join(f'<item><value>{v}</value></item>' for v in c['Values'])}</valueSet>
+        </item>""" for c in dopt["DhcpConfigurations"])
+        items += f"""<item>
+            <dhcpOptionsId>{dopt['DhcpOptionsId']}</dhcpOptionsId>
+            <dhcpConfigurationSet>{configs_xml}</dhcpConfigurationSet>
+            <ownerId>{dopt['OwnerId']}</ownerId>
+            <tagSet/>
+        </item>"""
+    return _xml(200, "DescribeDhcpOptionsResponse", f"<dhcpOptionsSet>{items}</dhcpOptionsSet>")
+
+
+def _delete_dhcp_options(params):
+    dopt_id = _p(params, "DhcpOptionsId")
+    if dopt_id not in _dhcp_options:
+        return _error("InvalidDhcpOptionsID.NotFound",
+                      f"The dhcp options '{dopt_id}' does not exist", 400)
+    del _dhcp_options[dopt_id]
+    return _xml(200, "DeleteDhcpOptionsResponse", "<return>true</return>")
+
+
+# ---------------------------------------------------------------------------
+# Egress-Only Internet Gateways
+# ---------------------------------------------------------------------------
+
+def _create_egress_only_igw(params):
+    vpc_id = _p(params, "VpcId")
+    if not vpc_id:
+        return _error("MissingParameter", "VpcId is required", 400)
+    eigw_id = "eigw-" + "".join(random.choices(string.hexdigits[:16], k=17))
+    tags = _parse_tags(params)
+    record = {
+        "EgressOnlyInternetGatewayId": eigw_id,
+        "VpcId": vpc_id,
+        "State": "attached",
+        "Tags": tags,
+    }
+    _egress_igws[eigw_id] = record
+    if tags:
+        _tags[eigw_id] = tags
+    inner = f"""<egressOnlyInternetGateway>
+        <egressOnlyInternetGatewayId>{eigw_id}</egressOnlyInternetGatewayId>
+        <attachmentSet>
+            <item>
+                <vpcId>{vpc_id}</vpcId>
+                <state>attached</state>
+            </item>
+        </attachmentSet>
+        <tagSet/>
+    </egressOnlyInternetGateway>"""
+    return _xml(200, "CreateEgressOnlyInternetGatewayResponse", inner)
+
+
+def _describe_egress_only_igws(params):
+    ids = _parse_member_list(params, "EgressOnlyInternetGatewayId")
+    items = ""
+    for eigw in _egress_igws.values():
+        if ids and eigw["EgressOnlyInternetGatewayId"] not in ids:
+            continue
+        items += f"""<item>
+            <egressOnlyInternetGatewayId>{eigw['EgressOnlyInternetGatewayId']}</egressOnlyInternetGatewayId>
+            <attachmentSet>
+                <item>
+                    <vpcId>{eigw['VpcId']}</vpcId>
+                    <state>{eigw['State']}</state>
+                </item>
+            </attachmentSet>
+            <tagSet/>
+        </item>"""
+    return _xml(200, "DescribeEgressOnlyInternetGatewaysResponse",
+                f"<egressOnlyInternetGatewaySet>{items}</egressOnlyInternetGatewaySet>")
+
+
+def _delete_egress_only_igw(params):
+    eigw_id = _p(params, "EgressOnlyInternetGatewayId")
+    if eigw_id not in _egress_igws:
+        return _error("InvalidGatewayID.NotFound",
+                      f"The egress only internet gateway '{eigw_id}' does not exist", 400)
+    del _egress_igws[eigw_id]
+    return _xml(200, "DeleteEgressOnlyInternetGatewayResponse", "<returnCode>true</returnCode>")
+
+
+# ---------------------------------------------------------------------------
 # Reset
 # ---------------------------------------------------------------------------
 
@@ -1410,6 +2233,14 @@ def reset():
     _route_tables.clear()
     _network_interfaces.clear()
     _vpc_endpoints.clear()
+    _volumes.clear()
+    _snapshots.clear()
+    _nat_gateways.clear()
+    _network_acls.clear()
+    _flow_logs.clear()
+    _vpc_peering.clear()
+    _dhcp_options.clear()
+    _egress_igws.clear()
     _init_defaults()
 
 
@@ -1474,4 +2305,53 @@ _ACTION_MAP = {
     "CreateVpcEndpoint": _create_vpc_endpoint,
     "DeleteVpcEndpoints": _delete_vpc_endpoints,
     "DescribeVpcEndpoints": _describe_vpc_endpoints,
+    # EBS Volumes
+    "CreateVolume": _create_volume,
+    "DeleteVolume": _delete_volume,
+    "DescribeVolumes": _describe_volumes,
+    "DescribeVolumeStatus": _describe_volume_status,
+    "AttachVolume": _attach_volume,
+    "DetachVolume": _detach_volume,
+    "ModifyVolume": _modify_volume,
+    "DescribeVolumesModifications": _describe_volumes_modifications,
+    "EnableVolumeIO": _enable_volume_io,
+    "ModifyVolumeAttribute": _modify_volume_attribute,
+    "DescribeVolumeAttribute": _describe_volume_attribute,
+    # EBS Snapshots
+    "CreateSnapshot": _create_snapshot,
+    "DeleteSnapshot": _delete_snapshot,
+    "DescribeSnapshots": _describe_snapshots,
+    "CopySnapshot": _copy_snapshot,
+    "ModifySnapshotAttribute": _modify_snapshot_attribute,
+    "DescribeSnapshotAttribute": _describe_snapshot_attribute,
+    # NAT Gateways
+    "CreateNatGateway": _create_nat_gateway,
+    "DescribeNatGateways": _describe_nat_gateways,
+    "DeleteNatGateway": _delete_nat_gateway,
+    # Network ACLs
+    "CreateNetworkAcl": _create_network_acl,
+    "DescribeNetworkAcls": _describe_network_acls,
+    "DeleteNetworkAcl": _delete_network_acl,
+    "CreateNetworkAclEntry": _create_network_acl_entry,
+    "DeleteNetworkAclEntry": _delete_network_acl_entry,
+    "ReplaceNetworkAclEntry": _replace_network_acl_entry,
+    "ReplaceNetworkAclAssociation": _replace_network_acl_association,
+    # Flow Logs
+    "CreateFlowLogs": _create_flow_logs,
+    "DescribeFlowLogs": _describe_flow_logs,
+    "DeleteFlowLogs": _delete_flow_logs,
+    # VPC Peering
+    "CreateVpcPeeringConnection": _create_vpc_peering_connection,
+    "AcceptVpcPeeringConnection": _accept_vpc_peering_connection,
+    "DescribeVpcPeeringConnections": _describe_vpc_peering_connections,
+    "DeleteVpcPeeringConnection": _delete_vpc_peering_connection,
+    # DHCP Options
+    "CreateDhcpOptions": _create_dhcp_options,
+    "AssociateDhcpOptions": _associate_dhcp_options,
+    "DescribeDhcpOptions": _describe_dhcp_options,
+    "DeleteDhcpOptions": _delete_dhcp_options,
+    # Egress-Only Internet Gateways
+    "CreateEgressOnlyInternetGateway": _create_egress_only_igw,
+    "DescribeEgressOnlyInternetGateways": _describe_egress_only_igws,
+    "DeleteEgressOnlyInternetGateway": _delete_egress_only_igw,
 }

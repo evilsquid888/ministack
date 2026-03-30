@@ -207,7 +207,7 @@ def _act_get_queue_url(data: dict, _u: str) -> dict:
     name = data.get("QueueName", "")
     url = _queue_name_to_url.get(name)
     if not url:
-        raise _Err("AWS.SimpleQueueService.NonExistentQueue",
+        raise _Err("QueueDoesNotExist",
                     "The specified queue does not exist.")
     return {"QueueUrl": url}
 
@@ -446,9 +446,13 @@ def _act_purge_queue(data: dict, qurl: str) -> dict:
 def _act_send_message_batch(data: dict, qurl: str) -> dict:
     url = data.get("QueueUrl", qurl)
     _get_q(url)
+    entries = data.get("Entries", [])
+    if len(entries) > 10:
+        raise _Err("TooManyEntriesInBatchRequest",
+                   "Too many messages in a batch request. A maximum of 10 messages are allowed.")
     ok: list = []
     fail: list = []
-    for e in data.get("Entries", []):
+    for e in entries:
         try:
             sub: dict = {
                 "QueueUrl": url,
@@ -547,7 +551,7 @@ _HANDLERS.update({
 def _get_q(url: str) -> dict:
     q = _queues.get(url)
     if q is None:
-        raise _Err("AWS.SimpleQueueService.NonExistentQueue",
+        raise _Err("QueueDoesNotExist",
                     "The specified queue does not exist for this wsdl version.")
     return q
 
@@ -781,10 +785,52 @@ def _json_ok(data: dict, status: int = 200) -> tuple:
             json.dumps(data).encode("utf-8"))
 
 
+# Mapping from JSON protocol shape names to legacy Query-protocol error codes.
+# SQS has the awsQueryCompatible trait: botocore reads x-amzn-query-error and
+# overrides Error.Code with the legacy code so SDK callers using the old
+# namespaced strings (e.g. "AWS.SimpleQueueService.NonExistentQueue") still work.
+_QUERY_COMPAT_CODES: dict[str, str] = {
+    # Source: aws-sdk-go service/sqs/errors.go ErrCode* constants (authoritative)
+    "QueueDoesNotExist":              "AWS.SimpleQueueService.NonExistentQueue",
+    "QueueNameExists":                "QueueAlreadyExists",
+    "TooManyEntriesInBatchRequest":   "AWS.SimpleQueueService.TooManyEntriesInBatchRequest",
+    "EmptyBatchRequest":              "AWS.SimpleQueueService.EmptyBatchRequest",
+    "BatchEntryIdsNotDistinct":       "AWS.SimpleQueueService.BatchEntryIdsNotDistinct",
+    "BatchRequestTooLong":            "AWS.SimpleQueueService.BatchRequestTooLong",
+    "InvalidBatchEntryId":            "AWS.SimpleQueueService.InvalidBatchEntryId",
+    "MessageNotInflight":             "AWS.SimpleQueueService.MessageNotInflight",
+    "PurgeQueueInProgress":           "AWS.SimpleQueueService.PurgeQueueInProgress",
+    "QueueDeletedRecently":           "AWS.SimpleQueueService.QueueDeletedRecently",
+    "UnsupportedOperation":           "AWS.SimpleQueueService.UnsupportedOperation",
+    "OverLimit":                      "OverLimit",
+    "InvalidIdFormat":                "InvalidIdFormat",
+    "InvalidMessageContents":         "InvalidMessageContents",
+    "ReceiptHandleIsInvalid":         "ReceiptHandleIsInvalid",
+    "InvalidAttributeName":           "InvalidAttributeName",
+    "InvalidAttributeValue":          "InvalidAttributeValue",
+    "InvalidSecurity":                "InvalidSecurity",
+    "InvalidAddress":                 "InvalidAddress",
+    "RequestThrottled":               "RequestThrottled",
+    "ResourceNotFoundException":      "ResourceNotFoundException",
+    # KMS errors — no namespace prefix
+    "KmsAccessDenied":                "KmsAccessDenied",
+    "KmsDisabled":                    "KmsDisabled",
+    "KmsInvalidKeyUsage":             "KmsInvalidKeyUsage",
+    "KmsInvalidState":                "KmsInvalidState",
+    "KmsNotFound":                    "KmsNotFound",
+    "KmsOptInRequired":               "KmsOptInRequired",
+    "KmsThrottled":                   "KmsThrottled",
+}
+
+
 def _json_err_resp(code: str, msg: str, status: int = 400) -> tuple:
-    return (status,
-            {"Content-Type": "application/x-amz-json-1.0"},
-            json.dumps({"__type": code, "message": msg}).encode("utf-8"))
+    fault = "Sender" if status < 500 else "Receiver"
+    legacy = _QUERY_COMPAT_CODES.get(code, code)
+    headers = {
+        "Content-Type": "application/x-amz-json-1.0",
+        "x-amzn-query-error": f"{legacy};{fault}",
+    }
+    return (status, headers, json.dumps({"__type": code, "message": msg}).encode("utf-8"))
 
 
 # ── XML ─────────────────────────────────────────────────────
@@ -801,10 +847,11 @@ def _xml_resp(status: int, root: str, inner: str) -> tuple:
 
 
 def _xml_err_resp(code: str, msg: str, status: int = 400) -> tuple:
+    sender_type = "Sender" if status < 500 else "Receiver"
     body = (
         f'<?xml version="1.0" encoding="UTF-8"?>'
         f'<ErrorResponse xmlns="http://queue.amazonaws.com/doc/2012-11-05/">'
-        f'<Error><Code>{_esc(code)}</Code><Message>{_esc(msg)}</Message></Error>'
+        f'<Error><Type>{sender_type}</Type><Code>{_esc(code)}</Code><Message>{_esc(msg)}</Message></Error>'
         f'<RequestId>{new_uuid()}</RequestId>'
         f'</ErrorResponse>'
     ).encode("utf-8")

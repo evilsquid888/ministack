@@ -16,21 +16,27 @@ from urllib.parse import parse_qs, urlparse
 
 # Matches host headers like "{apiId}.execute-api.localhost" or "{apiId}.execute-api.localhost:4566"
 _EXECUTE_API_RE = re.compile(r"^([a-f0-9]{8})\.execute-api\.localhost(?::\d+)?$")
-# Matches virtual-hosted S3: "{bucket}.localhost" or "{bucket}.localhost:4566"
-# Must not match execute-api or other known sub-services
-_S3_VHOST_RE = re.compile(r"^([^.]+)\.localhost(?::\d+)?$")
+# Matches virtual-hosted S3:
+#   "{bucket}.localhost" or "{bucket}.localhost:4566"          (boto3/SDK default)
+#   "{bucket}.s3.localhost" or "{bucket}.s3.localhost:4566"    (Terraform AWS provider v4+)
+# Does NOT match execute-api, alb, or other sub-service hostnames.
+_S3_VHOST_RE = re.compile(r"^([^.]+)(?:\.s3)?\.localhost(?::\d+)?$")
+_S3_VHOST_EXCLUDE_RE = re.compile(r"\.(execute-api|alb|emr|efs|elasticache)\.")
 
 from ministack.core.router import detect_service, extract_region, extract_account_id
 from ministack.core.persistence import save_all, load_state, PERSIST_STATE
 from ministack.services import s3, sqs, sns, dynamodb, lambda_svc, secretsmanager, cloudwatch_logs
 from ministack.services import ssm, eventbridge, kinesis, cloudwatch, ses, stepfunctions
 from ministack.services import ecs, rds, elasticache, glue, athena
+from ministack.services import alb
 from ministack.services import ec2
 from ministack.services import apigateway
 from ministack.services import firehose
 from ministack.services import apigateway_v1
 from ministack.services import route53
 from ministack.services import cognito
+from ministack.services import emr
+from ministack.services import efs
 from ministack.services import cloudformation
 from ministack.services.iam_sts import handle_iam_request, handle_sts_request
 
@@ -69,6 +75,9 @@ SERVICE_HANDLERS = {
     "cognito-idp": cognito.handle_request,
     "cognito-identity": cognito.handle_request,
     "ec2": ec2.handle_request,
+    "elasticmapreduce": emr.handle_request,
+    "elasticloadbalancing": alb.handle_request,
+    "elasticfilesystem": efs.handle_request,
     "cloudformation": cloudformation.handle_request,
 }
 
@@ -84,6 +93,8 @@ SERVICE_NAME_ALIASES = {
     "route53": "route53",
     "cognito-idp": "cognito-idp",
     "cognito-identity": "cognito-identity",
+    "elbv2": "elasticloadbalancing",
+    "elb": "elasticloadbalancing",
     "cloudformation": "cloudformation",
 }
 
@@ -121,7 +132,7 @@ BANNER = r"""
  Services: S3, SQS, SNS, DynamoDB, Lambda, IAM, STS, SecretsManager, CloudWatch Logs,
           SSM, EventBridge, Kinesis, CloudWatch, SES, Step Functions,
           ECS, RDS, ElastiCache, Glue, Athena, API Gateway, Firehose, Route53,
-          Cognito, CloudFormation
+          Cognito, EC2, EMR, EBS, EFS, ALB/ELBv2, CloudFormation
 """
 
 
@@ -159,6 +170,26 @@ async def app(scope, receive, send):
         _reset_all_state()
         await _send_response(send, 200, {"Content-Type": "application/json"},
                              json.dumps({"reset": "ok"}).encode())
+        return
+
+    if path == "/_ministack/config" and method == "POST":
+        try:
+            config = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            config = {}
+        applied = {}
+        for key, value in config.items():
+            # Set module-level variables on service modules: "athena.ATHENA_ENGINE" -> "sqlite"
+            if "." in key:
+                mod_name, var_name = key.rsplit(".", 1)
+                try:
+                    mod = __import__(f"ministack.services.{mod_name}", fromlist=[var_name])
+                    setattr(mod, var_name, value)
+                    applied[key] = value
+                except (ImportError, AttributeError) as e:
+                    logger.warning("/_ministack/config: failed to set %s: %s", key, e)
+        await _send_response(send, 200, {"Content-Type": "application/json"},
+                             json.dumps({"applied": applied}).encode())
         return
 
     if path in ("/_localstack/health", "/health", "/_ministack/health"):
@@ -213,9 +244,44 @@ async def app(scope, receive, send):
         await _send_response(send, status, resp_headers, resp_body)
         return
 
+    # ALB data-plane — two addressing modes:
+    #   1. Host header matches a configured ALB DNS name or {lb-name}.alb.localhost
+    #   2. Path prefix /_alb/{lb-name}/...  (no DNS config needed for local testing)
+    _alb_lb = alb.find_lb_for_host(host)
+    if _alb_lb is None and path.startswith("/_alb/"):
+        _alb_path_parts = path[6:].split("/", 1)
+        _alb_lb = alb._find_lb_by_name(_alb_path_parts[0])
+        if _alb_lb:
+            path = "/" + _alb_path_parts[1] if len(_alb_path_parts) > 1 else "/"
+
+    if _alb_lb:
+        _alb_port = 80
+        if ":" in host:
+            try:
+                _alb_port = int(host.rsplit(":", 1)[-1])
+            except ValueError:
+                pass
+        try:
+            status, resp_headers, resp_body = await alb.dispatch_request(
+                _alb_lb, method, path, headers, body, query_params, _alb_port
+            )
+        except Exception as e:
+            logger.exception(f"Error in ALB data-plane dispatch: {e}")
+            status, resp_headers, resp_body = (
+                500, {"Content-Type": "application/json"},
+                json.dumps({"message": str(e)}).encode(),
+            )
+        resp_headers.update({
+            "Access-Control-Allow-Origin": "*",
+            "x-amzn-requestid": request_id,
+            "x-amz-request-id": request_id,
+        })
+        await _send_response(send, status, resp_headers, resp_body)
+        return
+
     # Virtual-hosted S3: {bucket}.localhost[:{port}] — rewrite to path-style and forward to S3
     _s3_vhost = _S3_VHOST_RE.match(host)
-    if _s3_vhost and not _execute_match:
+    if _s3_vhost and not _execute_match and not _S3_VHOST_EXCLUDE_RE.search(host):
         bucket = _s3_vhost.group(1)
         _non_s3_hosts = {"s3", "sqs", "sns", "dynamodb", "lambda", "iam", "sts",
                          "secretsmanager", "logs", "ssm", "events", "kinesis",
@@ -378,6 +444,9 @@ def _reset_all_state():
         (route53, route53.reset),
         (cognito, cognito.reset),
         (ec2, ec2.reset),
+        (emr, emr.reset),
+        (alb, alb.reset),
+        (efs, efs.reset),
         (cloudformation, cloudformation.reset),
     ]:
         try:

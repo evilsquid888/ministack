@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+<<<<<<< HEAD
 ## [1.2.0] — 2026-03-27
 
 ### Added
@@ -19,12 +20,144 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   - **Dependency Resolution**: Topological sort with cycle detection; `DependsOn` and implicit reference scanning
   - **Rollback**: Automatic rollback on creation failure (deletes created resources in reverse order)
   - 13 integration tests
+=======
+## [1.1.7] — 2026-03-30
+
+### Added
+- **Athena engine control** — new `ATHENA_ENGINE` env var (`auto` | `duckdb` | `mock`) to select the SQL backend at startup; `auto` keeps existing behaviour (DuckDB if installed, mock otherwise). New `/_ministack/config` endpoint accepts `POST {"athena.ATHENA_ENGINE": "mock"}` to switch engines at runtime without restart — useful in CI to force mock mode without DuckDB installed. Contributed by @jespinoza-shippo.
+- **VPC gap coverage** — 6 new EC2 resource types, 22 new actions, 11 new tests
+  - **NAT Gateways**: `CreateNatGateway`, `DescribeNatGateways`, `DeleteNatGateway` — supports `SubnetId`, `ConnectivityType` (public/private), state transitions, `vpc-id`/`subnet-id`/`state` filters
+  - **Network ACLs**: `CreateNetworkAcl`, `DescribeNetworkAcls`, `DeleteNetworkAcl`, `CreateNetworkAclEntry`, `DeleteNetworkAclEntry`, `ReplaceNetworkAclEntry`, `ReplaceNetworkAclAssociation` — full CRUD with rule entries and subnet associations
+  - **Flow Logs**: `CreateFlowLogs`, `DescribeFlowLogs`, `DeleteFlowLogs` — supports VPC/subnet/ENI resource targets, CloudWatch Logs and S3 destinations, `resource-id` filter
+  - **VPC Peering**: `CreateVpcPeeringConnection`, `AcceptVpcPeeringConnection`, `DescribeVpcPeeringConnections`, `DeleteVpcPeeringConnection` — full lifecycle from `pending-acceptance` → `active` → `deleted`, cross-account/cross-region params accepted
+  - **DHCP Options**: `CreateDhcpOptions`, `AssociateDhcpOptions`, `DescribeDhcpOptions`, `DeleteDhcpOptions` — arbitrary key/value configurations, association updates `VpcId.DhcpOptionsId`
+  - **Egress-Only Internet Gateways**: `CreateEgressOnlyInternetGateway`, `DescribeEgressOnlyInternetGateways`, `DeleteEgressOnlyInternetGateway` — IPv6 egress-only IGW for VPCs
+
+### Fixed
+- **SQS `awsQueryCompatible` header** — all SQS JSON error responses now include the `x-amzn-query-error: <legacy_code>;<fault>` header required by the `awsQueryCompatible` service trait. botocore reads this header and overrides `Error.Code` with the legacy `AWS.SimpleQueueService.*` namespaced code (e.g. `AWS.SimpleQueueService.NonExistentQueue` instead of `QueueDoesNotExist`). Without this header, any SDK code that matched against the legacy string worked against real AWS but silently failed against MiniStack. Full mapping of all 28 SQS error shapes sourced from `aws-sdk-go` ErrCode constants.
+
+### Tests
+- 708 integration tests — all passing
+
+---
+
+## [1.1.6] — 2026-03-30
+
+### Fixed
+- **XML error responses** — added `<Type>Sender</Type>` (4xx) / `<Type>Receiver</Type>` (5xx) to all XML error responses in `sqs.py` and `core/responses.py` (used by S3, SNS, IAM, STS, CloudWatch). botocore requires this element to populate typed exception classes (e.g. `client.exceptions.QueueDoesNotExist`). Without it, botocore fell back to generic `ClientError` even when the error `Code` was correct.
+
+### Tests
+- 694 integration tests — all passing
+
+---
+
+## [1.1.5] — 2026-03-30
+
+### Fixed
+- **API Gateway v1** — `createdDate` / `lastUpdatedDate` fields now returned as Unix timestamps (integers) instead of ISO strings. Terraform AWS provider v4+ deserializes these as JSON Numbers and raised `expected Timestamp to be a JSON Number, got string instead` on `CreateRestApi`.
+- **API Gateway v2** — same fix applied to `createdDate` / `lastUpdatedDate` on APIs and stages.
+- **S3 virtual-hosted style** — host pattern now also matches `{bucket}.s3.localhost[:{port}]` in addition to `{bucket}.localhost[:{port}]`. Terraform AWS provider v4+ uses the `.s3.` subdomain when `force_path_style = false`.
+- **CloudWatch Logs `ListTagsForResource`** — ARN lookup now accepts both `arn:...:log-group:{name}` and `arn:...:log-group:{name}:*`. Terraform passes the ARN without the trailing `:*` that MiniStack appends internally, causing `ResourceNotFoundException`.
+- **SQS `SendMessageBatch`** — now rejects batches with more than 10 entries with `AWS.SimpleQueueService.TooManyEntriesInBatchRequest`, matching real AWS behaviour. Previously MiniStack silently accepted oversized batches.
+- **DynamoDB `BatchWriteItem`** — now includes `ConsumedCapacity` as a list in the response when `ReturnConsumedCapacity` is set to `TOTAL` or `INDEXES`. Previously the field was absent entirely.
+
+### Tests
+- 5 regression tests added (one per fix above) — 693 integration tests total, all passing
+
+---
+
+## [1.1.4] — 2026-03-30
+
+### Added
+- **Amazon ELBv2 / ALB** (`ministack/services/alb.py`) — full control plane + data plane
+  - **Load Balancers**: `CreateLoadBalancer`, `DescribeLoadBalancers`, `DeleteLoadBalancer`, `DescribeLoadBalancerAttributes`, `ModifyLoadBalancerAttributes`
+  - **Target Groups**: `CreateTargetGroup`, `DescribeTargetGroups`, `ModifyTargetGroup`, `DeleteTargetGroup`, `DescribeTargetGroupAttributes`, `ModifyTargetGroupAttributes`
+  - **Listeners**: `CreateListener`, `DescribeListeners`, `ModifyListener`, `DeleteListener`
+  - **Rules**: `CreateRule`, `DescribeRules`, `ModifyRule`, `DeleteRule`, `SetRulePriorities`
+  - **Targets**: `RegisterTargets`, `DeregisterTargets`, `DescribeTargetHealth`
+  - **Tags**: `AddTags`, `RemoveTags`, `DescribeTags`
+  - **Data plane — ALB→Lambda live traffic routing**
+    - Incoming HTTP requests matched against configured listener rules (priority order)
+    - Rule conditions supported: `path-pattern`, `host-header`, `http-method`, `query-string`, `http-header` (fnmatch glob matching)
+    - Actions supported: `forward` (to target group), `fixed-response`, `redirect` (301/302 with `#{host}`/`#{path}`/`#{port}` substitution)
+    - `TargetType=lambda` target groups: builds ALB event payload (httpMethod, path, queryStringParameters, multiValueQueryStringParameters, headers, multiValueHeaders, body, isBase64Encoded, requestContext.elb) and invokes Lambda via the in-process Lambda runtime; translates Lambda response (statusCode, headers, multiValueHeaders, body, isBase64Encoded) back to HTTP
+    - Two addressing modes — no DNS or `/etc/hosts` changes required for local testing:
+      - **Host-header**: `Host: {lb-name}.alb.localhost[:{port}]` or the ALB's exact `DNSName`
+      - **Path prefix**: `/_alb/{lb-name}/path` (rewrites path before rule evaluation)
+  - Query/XML protocol via `Action=` parameter; credential scope `elasticloadbalancing`
+  - 10 control-plane integration tests + 7 data-plane integration tests
+
+### Tests
+- 688 integration tests — all passing
+
+---
+
+## [1.1.3] — 2026-03-30
+
+### Added
+- **Amazon EBS** (Elastic Block Store) — added to the EC2 Query/XML service handler
+  - **Volumes**: `CreateVolume`, `DeleteVolume`, `DescribeVolumes`, `DescribeVolumeStatus`,
+    `AttachVolume`, `DetachVolume`, `ModifyVolume`, `DescribeVolumesModifications`,
+    `EnableVolumeIO`, `ModifyVolumeAttribute`, `DescribeVolumeAttribute`
+  - **Snapshots**: `CreateSnapshot`, `DeleteSnapshot`, `DescribeSnapshots`,
+    `CopySnapshot`, `ModifySnapshotAttribute`, `DescribeSnapshotAttribute`
+  - All three volume types supported (gp2/gp3/io1/io2/st1/sc1)
+  - Attach/Detach updates volume state (available ↔ in-use)
+  - ModifyVolume returns `completed` immediately
+  - Snapshots store as `completed` (emulator — no real EBS)
+  - Pro-only on LocalStack — free here
+  - 8 integration tests
+
+- **Amazon EFS** (Elastic File System) — new service (`ministack/services/efs.py`)
+  - REST/JSON protocol via `/2015-02-01/*` paths, credential scope `elasticfilesystem`
+  - **File Systems**: `CreateFileSystem`, `DescribeFileSystems`, `DeleteFileSystem`,
+    `UpdateFileSystem` — CreationToken idempotency enforced
+  - **Mount Targets**: `CreateMountTarget`, `DescribeMountTargets`, `DeleteMountTarget`,
+    `DescribeMountTargetSecurityGroups`, `ModifyMountTargetSecurityGroups`
+  - **Access Points**: `CreateAccessPoint`, `DescribeAccessPoints`, `DeleteAccessPoint`
+  - **Tags**: `TagResource`, `UntagResource`, `ListTagsForResource`
+  - **Lifecycle**: `PutLifecycleConfiguration`, `DescribeLifecycleConfiguration`
+  - **Backup Policy**: `PutBackupPolicy`, `DescribeBackupPolicy`
+  - **Account**: `DescribeAccountPreferences`, `PutAccountPreferences`
+  - FileSystem with active mount targets blocks deletion (`FileSystemInUse`)
+  - Pro-only on LocalStack — free here
+  - 10 integration tests
+
+### Tests
+- 671 integration tests — all passing (672 - 1 flaky Docker ECS test)
+
+---
+
+## [1.1.2] — 2026-03-29
+
+### Added
+
+- **Amazon EMR** (`ministack/services/emr.py`) — full control plane emulation (no real Spark/Hadoop)
+  - **Clusters**: `RunJobFlow`, `DescribeCluster`, `ListClusters`, `TerminateJobFlows`, `ModifyCluster`, `SetTerminationProtection`, `SetVisibleToAllUsers`
+  - **Steps**: `AddJobFlowSteps`, `DescribeStep`, `ListSteps`, `CancelSteps` — steps stored as COMPLETED immediately (emulator behaviour)
+  - **Instance Fleets**: `AddInstanceFleet`, `ListInstanceFleets`, `ModifyInstanceFleet`
+  - **Instance Groups**: `AddInstanceGroups`, `ListInstanceGroups`, `ModifyInstanceGroups`
+  - **Bootstrap Actions**: `ListBootstrapActions`
+  - **Tags**: `AddTags`, `RemoveTags`
+  - **Block Public Access**: `GetBlockPublicAccessConfiguration`, `PutBlockPublicAccessConfiguration`
+  - All three instance config modes: simple (`MasterInstanceType`/`SlaveInstanceType`/`InstanceCount`), `InstanceGroups`, `InstanceFleets`
+  - `KeepJobFlowAliveWhenNoSteps=True` → `WAITING`; `False` → `TERMINATED`
+  - `TerminationProtected=True` raises `ValidationException` on `TerminateJobFlows`
+  - JSON protocol via `X-Amz-Target: ElasticMapReduce.{Op}`, credential scope `elasticmapreduce`
+  - Pro-only on LocalStack — free in MiniStack
+  - 12 integration tests
+
+### Tests
+
+- 656 integration tests — all passing
+>>>>>>> upstream/master
 
 ---
 
 ## [1.1.1] — 2026-03-29
 
 ### Added
+
 - **Amazon EC2** (`ministack/services/ec2.py`) — full API-level emulation (no real VMs)
   - **Instances**: `RunInstances`, `DescribeInstances`, `TerminateInstances`, `StopInstances`, `StartInstances`, `RebootInstances`
   - **Images**: `DescribeImages` — returns 3 stub AMIs (Amazon Linux 2, Ubuntu 22.04, Windows Server 2022)
@@ -52,6 +185,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   - 5 integration tests: CRUD, list, duplicate-name error, worker success flow, worker failure flow
 
 ### Tests
+
 - 644 integration tests — all passing
 
 ---
@@ -59,6 +193,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [1.1.0] — 2026-03-28
 
 ### Added
+
 - **Amazon Cognito** (`ministack/services/cognito.py`) — full User Pool and Identity Pool emulation
   - **User Pools (cognito-idp)**: CreateUserPool, DeleteUserPool, DescribeUserPool, ListUserPools, UpdateUserPool
   - **User Pool Clients**: CreateUserPoolClient, DeleteUserPoolClient, DescribeUserPoolClient, ListUserPoolClients, UpdateUserPoolClient
@@ -77,12 +212,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   - 43 integration tests covering full CRUD lifecycle for User Pools, Pool Clients, Users, Auth flows, Refresh tokens, Groups, Domains, MFA, Tags, and Identity Pools
 
 ### Changed
+
 - **Package restructure**: all source code moved into `ministack/` package (`ministack/app.py`, `ministack/core/`, `ministack/services/`) — fixes `pip install ministack` entrypoint crash (`app:main` was unresolvable because `app.py` was not included in the wheel)
 - **Entrypoint**: `ministack = "app:main"` → `ministack = "ministack.app:main"`
 - **ASGI module**: `app:app` → `ministack.app:app` in Dockerfile and CI
 - **PyPI trusted publishing**: OIDC workflow added (`pypi-publish.yml`) — no API token needed, publishes on `v*.*.*` tag push
 
 ### Fixed
+
 - **Lambda `GetFunctionConcurrency`**: returns `{}` instead of 404 after `DeleteFunctionConcurrency` — matches AWS behaviour where an unset concurrency limit returns an empty response
 - **Cognito `GetCredentialsForIdentity`**: response field is `SecretKey` (correct boto3 wire name) — was incorrectly named `SecretAccessKey`
 - **ElastiCache `ModifyCacheParameterGroup` / `ResetCacheParameterGroup`**: parameter list key was `ParameterNameValues.member.{n}.*` — corrected to `ParameterNameValues.ParameterNameValue.{n}.*` matching actual boto3 Query API serialisation
@@ -91,9 +228,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **Docker Compose**: added `build: .` so `docker compose up --build` uses local source instead of always pulling from Docker Hub
 
 ### Infrastructure
+
 - **`Makefile` `purge` target**: kills all containers labelled `ministack`, prunes dangling volumes, and clears `./data/s3/` — safe to run alongside other projects (filter is label-scoped, not image-scoped)
 
 ### Tests
+
 - 3 package structure tests: `test_package_core_importable`, `test_package_services_importable`, `test_app_asgi_callable`
 - Merged all 97 tests from `test_qa_comprehensive.py` into `test_services.py` — single test file, `test_qa_comprehensive.py` deleted
 - Fixed `test_cognito_get_id_and_credentials`: `SecretAccessKey` → `SecretKey`
@@ -107,6 +246,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [1.0.8] — 2026-03-28
 
 ### Added
+
 - **Amazon Route53** (`services/route53.py`) — full hosted zone and DNS record management
   - Hosted zones: `CreateHostedZone`, `GetHostedZone`, `DeleteHostedZone`, `ListHostedZones`, `ListHostedZonesByName`, `UpdateHostedZoneComment`
   - Record sets: `ChangeResourceRecordSets` (CREATE / UPSERT / DELETE, atomic batch), `ListResourceRecordSets`
@@ -127,6 +267,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   - 7 integration tests covering S3 keys, S3 metadata, DynamoDB, SQS, Secrets Manager, SSM, and Route53 zone comments
 
 ### Fixed
+
 - **DynamoDB TTL reaper thread-safety**: the background reaper thread now holds `_lock` while scanning and deleting expired items — eliminates a race condition with concurrent request handlers that could corrupt table state or crash the reaper under load
 - **S3 `PutObject` / `CreateBucket` spurious `Content-Type`**: these operations no longer return `Content-Type: application/xml` on success (AWS returns no Content-Type for empty 200 bodies) — prevents SDK response-parsing warnings
 - **S3 `DeleteObject` delete-marker header**: non-versioned buckets now return an empty 204 with no extra headers; versioned/suspended buckets return `x-amz-delete-marker: true` — previously all buckets unconditionally returned `x-amz-delete-marker: false`
@@ -146,6 +287,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **`make run` Docker socket mount**: added `-v /var/run/docker.sock:/var/run/docker.sock` so ECS `RunTask` works when running via `make run`
 
 ### Tests
+
 - 4 regression tests added, one per botocore-confirmed bug: `test_ddb_query_pagination_hash_only`, `test_sqs_batch_delete_invalid_receipt_handle`, `test_sns_to_lambda_event_subscription_arn`, `test_lambda_unknown_path_returns_404`
 - 2 regression tests for runtime fixes: `test_lambda_reset_terminates_workers`, `test_sfn_integration_lambda_invoke`
 - 479 integration tests — all passing, including against Docker image
@@ -155,6 +297,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [1.0.7] — 2026-03-27
 
 ### Added
+
 - **Amazon Data Firehose** (`services/firehose.py`) — full control and data plane
   - `CreateDeliveryStream`, `DeleteDeliveryStream`, `DescribeDeliveryStream`, `ListDeliveryStreams`
   - `PutRecord`, `PutRecordBatch` — base64-encoded record ingestion; S3-destination streams write records synchronously to the local S3 emulator
@@ -169,6 +312,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **Virtual-hosted style S3**: `{bucket}.localhost[:{port}]` host header routing — requests are rewritten to path-style and forwarded to the S3 handler; compatible with AWS SDK virtual-hosted endpoint configuration
 
 ### Fixed
+
 - **DynamoDB expression evaluator short-circuit bug**: `OR`/`AND` operators in `ConditionExpression` and `FilterExpression` now always consume both operands' tokens before applying the logical result — Python's boolean short-circuit was skipping right-hand token consumption when the left operand was already truthy/falsy, causing `Invalid expression: Expected RPAREN, got NAME_REF` on expressions like `attribute_not_exists(#0) OR #1 <= :0` (reported by PynamoDB users with numeric `ExpressionAttributeNames` keys)
 
 ---
@@ -176,6 +320,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [1.0.6] — 2026-03-27
 
 ### Added
+
 - **API Gateway REST API v1** (`services/apigateway_v1.py`) — complete control plane and data plane
   - Full resource tree: `CreateRestApi`, `GetRestApi`, `GetRestApis`, `UpdateRestApi`, `DeleteRestApi`
   - Resources: `CreateResource`, `GetResource`, `GetResources`, `UpdateResource`, `DeleteResource`
@@ -210,6 +355,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [1.0.5] — 2026-03-26
 
 ### Fixed
+
 - **DynamoDB `UpdateItem` condition expression on missing item**: `ConditionExpression` such as `attribute_exists(...)` now correctly evaluates against the existing stored item (or empty if missing) — was incorrectly evaluating against the in-progress mutation, causing `ConditionalCheckFailedException` to never fire on missing items
 - **DynamoDB key schema validation**: `GetItem`, `DeleteItem`, `UpdateItem`, `BatchWriteItem`, `BatchGetItem` now validate that supplied key attributes match the table schema in name and type — returns `ValidationException: The provided key element does not match the schema`
 - **ESM visibility timeout**: SQS → Lambda event source mapping now respects the queue's configured `VisibilityTimeout` instead of hardcoding 30 s — prevents retry storms and duplicate deliveries when Lambda fails
@@ -226,6 +372,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [1.0.4] — 2026-03-26
 
 ### Fixed
+
 - **SQS queue URL host/port**: `QueueUrl` values now read `MINISTACK_HOST` and `GATEWAY_PORT` env vars instead of hardcoding `localhost:4566` — fixes queue URLs when running behind a custom hostname or port
 - 379 integration tests — all passing, including against Docker image
 
@@ -234,6 +381,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [1.0.3] — 2026-03-25
 
 ### Fixed
+
 - **Test port portability**: execute-api test URLs now read port from `MINISTACK_ENDPOINT` env var instead of hardcoding 4566 — fixes all execute-api tests when running against Docker on a non-default port
 - **API Gateway Authorizers**: `CreateAuthorizer`, `GetAuthorizer`, `GetAuthorizers`, `UpdateAuthorizer`, `DeleteAuthorizer` — full CRUD for JWT and Lambda authorizers; state included in persistence snapshot
 - **API Gateway `{proxy+}` greedy path matching**: `_path_matches` now handles `{param+}` placeholders matching multiple path segments (e.g. `/files/{proxy+}` matches `/files/a/b/c`)
@@ -249,6 +397,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ### Added
 
 **API Gateway HTTP API v2** (completing roadmap item)
+
 - Full control plane: CreateApi, GetApi, GetApis, UpdateApi, DeleteApi
 - Routes: CreateRoute, GetRoute, GetRoutes, UpdateRoute, DeleteRoute
 - Integrations: CreateIntegration, GetIntegration, GetIntegrations, UpdateIntegration, DeleteIntegration
@@ -262,22 +411,26 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - State persistence support via `get_state()` / `load_persisted_state()`
 
 **SNS → SQS Fanout** (completing roadmap item)
+
 - SNS subscriptions with `sqs` protocol deliver messages directly to SQS queues
 - Message envelope follows AWS SNS JSON notification format
 - Fanout is synchronous within the same process
 
 **SQS → Lambda Event Source Mapping**
+
 - `CreateEventSourceMapping` / `DeleteEventSourceMapping` / `GetEventSourceMapping` / `ListEventSourceMappings` / `UpdateEventSourceMapping`
 - Background poller delivers SQS messages to Lambda functions as batched events
 - Configurable batch size and enabled/disabled state
 
 **Lambda Warm/Cold Start Worker Pool** (`core/lambda_runtime.py`)
+
 - Persistent Python subprocess per function — handler module imported once (cold start)
 - Subsequent invocations reuse the warm worker without re-importing
 - Worker respawns automatically on crash
 - Accurately models AWS Lambda cold/warm start behavior
 
 **State Persistence Infrastructure** (`core/persistence.py`)
+
 - `PERSIST_STATE=1` environment variable enables persistence
 - `STATE_DIR` environment variable controls storage location (default `/tmp/ministack-state`)
 - Atomic file writes (write-to-tmp then rename) prevent corruption on crash
@@ -285,6 +438,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Persistence framework ready for other services to adopt
 
 ### Fixed
+
 - `_path_matches` bug in API Gateway: `re.escape` was applied before `{param}` substitution,
   causing all parameterised routes to never match. Fixed by splitting on `{param}` segments,
   escaping literal parts, then joining with `[^/]+` wildcards.
@@ -292,6 +446,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   corrected to `apigateway`.
 
 ### Infrastructure
+
 - `app.py`: API Gateway registered in `SERVICE_HANDLERS`, BANNER, and `SERVICE_NAME_ALIASES`
 - `app.py`: Execute-api data plane dispatched before normal service routing via host-header match
 - `app.py`: Persistence load/save wired into ASGI lifespan startup/shutdown
@@ -304,6 +459,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - 371 integration tests — all passing (up from 54 in v0.1.0)
 
 ### Fixed (post-release patches)
+
 - **SNS → Lambda fanout**: `protocol == "lambda"` subscriptions now invoke the Lambda function via `_execute_function()` with a standard `Records[].Sns` event envelope (was a no-op stub)
 - **DynamoDB TTL enforcement**: background daemon thread (`dynamodb-ttl-reaper`) now scans every 60 s and deletes items whose TTL attribute value is ≤ current epoch time
 - **Lambda Function URLs**: `CreateFunctionUrlConfig`, `GetFunctionUrlConfig`, `UpdateFunctionUrlConfig`, `DeleteFunctionUrlConfig`, `ListFunctionUrlConfigs` — full CRUD, persisted in `_function_urls` dict; was a 404 stub
@@ -318,7 +474,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - 377 integration tests — all passing, including against Docker image
 
 ### Roadmap Update
+
 The following roadmap items from v0.1.0 are now **completed**:
+
 - API Gateway (HTTP API v2) — full control and data plane delivered
 - SNS → SQS fan-out delivery
 - DynamoDB transactions (TransactWriteItems, TransactGetItems)
@@ -335,6 +493,7 @@ Initial public release. Built as a free, open-source alternative to LocalStack.
 ### Services Added
 
 **Core (9 services)**
+
 - S3 — CreateBucket, DeleteBucket, ListBuckets, HeadBucket, PutObject, GetObject, DeleteObject, HeadObject, CopyObject, ListObjects v1/v2, DeleteObjects (batch), optional disk persistence
 - SQS — Full queue lifecycle, send/receive/delete, visibility timeout, batch operations, both Query API and JSON protocol
 - SNS — Topics, subscriptions, publish
@@ -346,6 +505,7 @@ Initial public release. Built as a free, open-source alternative to LocalStack.
 - CloudWatch Logs — Log groups, streams, PutLogEvents, GetLogEvents, FilterLogEvents
 
 **Extended (6 services)**
+
 - SSM Parameter Store — PutParameter, GetParameter, GetParametersByPath, DeleteParameter
 - EventBridge — Event buses, rules, targets, PutEvents
 - Kinesis — Streams, shards, PutRecord, PutRecords, GetShardIterator, GetRecords
@@ -354,6 +514,7 @@ Initial public release. Built as a free, open-source alternative to LocalStack.
 - Step Functions — State machines, executions, history
 
 **Infrastructure (5 services)**
+
 - ECS — Clusters, task definitions, services, RunTask with real Docker container execution
 - RDS — CreateDBInstance spins up real Postgres/MySQL Docker containers with actual endpoints
 - ElastiCache — CreateCacheCluster spins up real Redis/Memcached Docker containers
@@ -361,6 +522,7 @@ Initial public release. Built as a free, open-source alternative to LocalStack.
 - Athena — Real SQL execution via DuckDB, s3:// path rewriting to local files
 
 ### Infrastructure
+
 - Single ASGI app on port 4566 (LocalStack-compatible)
 - Docker Compose with Redis sidecar
 - Multi-arch Docker image (amd64 + arm64)
@@ -374,6 +536,6 @@ Initial public release. Built as a free, open-source alternative to LocalStack.
 ## Roadmap
 
 ### Planned
+
 - ACM (certificate management)
 - State persistence for Secrets Manager, SSM, DynamoDB (`PERSIST_STATE=1` currently only covers API Gateway v1/v2)
-
